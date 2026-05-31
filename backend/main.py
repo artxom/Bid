@@ -1,5 +1,6 @@
 import re
 from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from docx import Document
 import uvicorn
@@ -10,6 +11,10 @@ import os
 from pydantic import BaseModel
 from typing import List, Optional
 from dotenv import load_dotenv
+import json
+
+from services.commander import rewrite_outline_with_gemini, stream_rewrite_outline_with_gemini
+from services.docx_builder import rebuild_docx_from_outline
 
 # 加载环境变量
 load_dotenv()
@@ -102,6 +107,11 @@ class GenerateRequest(BaseModel):
     sections: List[SectionItem]
     global_guidelines: Optional[str] = ""
 
+class RewriteRequest(BaseModel):
+    instruction: str
+    current_outline: List[dict]
+    active_chapter_id: Optional[str] = None
+
 MAX_CONCURRENCY = 5
 
 async def call_dify_workflow(section: SectionItem, global_guidelines: str, semaphore: asyncio.Semaphore) -> dict:
@@ -156,6 +166,69 @@ async def generate_sections(request: GenerateRequest):
         "status": "completed",
         "results": results
     }
+
+class ExportRequest(BaseModel):
+    outline: List[dict]
+
+@app.post("/export-outline")
+async def export_outline(request: ExportRequest):
+    try:
+        buffer = rebuild_docx_from_outline(request.outline)
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": "attachment; filename=outline_skeleton.docx"}
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "error": str(e)}
+
+@app.post("/commander/rewrite-outline")
+async def rewrite_outline(request: RewriteRequest):
+    try:
+        new_outline = await rewrite_outline_with_gemini(
+            user_instruction=request.instruction,
+            current_outline=request.current_outline,
+            active_chapter_id=request.active_chapter_id
+        )
+        # 也可以在这里调用 docx_builder 生成新的框架文档
+        # buffer = rebuild_docx_from_outline(new_outline)
+        # 例如可以存一份 skeleton.docx，或者直接返回下载
+        
+        # 对于返回，如果 new_outline 是 BaseModel 的实例，转成 dict
+        if new_outline and hasattr(new_outline[0], 'model_dump'):
+            parsed_outline = [item.model_dump() for item in new_outline]
+        elif new_outline and hasattr(new_outline[0], 'dict'):
+            parsed_outline = [item.dict() for item in new_outline]
+        else:
+            parsed_outline = new_outline
+            
+        return {
+            "status": "success",
+            "outline": parsed_outline
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "error": str(e)}
+
+@app.post("/commander/rewrite-stream")
+async def rewrite_stream(request: RewriteRequest):
+    async def event_generator():
+        try:
+            async for chunk in stream_rewrite_outline_with_gemini(
+                user_instruction=request.instruction,
+                current_outline=request.current_outline,
+                active_chapter_id=request.active_chapter_id
+            ):
+                yield f"data: {json.dumps({'chunk': chunk}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+            
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):

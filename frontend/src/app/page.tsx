@@ -139,9 +139,11 @@ export default function Dashboard() {
   const [input, setInput] = useState("");
   const [flatOutline, setFlatOutline] = useState<OutlineItem[]>(MOCK_FLAT_OUTLINE);
   const [uploading, setUploading] = useState(false);
+  const [isCommanding, setIsCommanding] = useState(false);
   const [activeChapterId, setActiveChapterId] = useState<string>("2.1");
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set(["2"]));
   const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
+  const [isExporting, setIsExporting] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -224,16 +226,123 @@ export default function Dashboard() {
     fileInputRef.current?.click();
   };
 
-  const handleSendMessage = () => {
-    if (!input.trim()) return;
-    setMessages([...messages, { role: "user", content: input }]);
+  const handleSendMessage = async () => {
+    if (!input.trim() || isCommanding) return;
+    const userInstruction = input;
+    setMessages(prev => [...prev, { role: "user", content: userInstruction }]);
     setInput("");
-    setTimeout(() => {
+    
+    if (flatOutline.length === 0) {
+      setMessages(prev => [...prev, { role: "assistant", content: "⚠️ 请先上传投标底稿，我需要先掌握当前的大纲结构。" }]);
+      return;
+    }
+
+    setIsCommanding(true);
+    // Don't add a hardcoded text message. The stream will fill the next message.
+
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const response = await fetch(`${apiUrl}/commander/rewrite-stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instruction: userInstruction,
+          active_chapter_id: activeChapterId,
+          current_outline: flatOutline.map(item => ({
+            id: item.id,
+            title: item.title,
+            level: item.level,
+            index: parseInt(item.id.split('.').pop() || '0') || 0
+          }))
+        })
+      });
+
+      if (!response.ok) throw new Error("大纲重写请求失败");
+      if (!response.body) throw new Error("No response body");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let streamBuffer = "";
+      let fullContent = "🧠 主脑思考中...\n\n";
+
+      // Append an empty assistant message that will be populated by the stream
+      setMessages(prev => [...prev, { role: "assistant", content: fullContent }]);
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        streamBuffer += decoder.decode(value, { stream: true });
+        
+        const parts = streamBuffer.split("\n\n");
+        streamBuffer = parts.pop() || "";
+
+        for (const part of parts) {
+          if (part.startsWith("data: ")) {
+            const dataStr = part.slice(6);
+            try {
+              const data = JSON.parse(dataStr);
+              if (data.error) throw new Error(data.error);
+              if (data.chunk) {
+                // Filter out the internal time tag from displaying to user
+                let chunkText = data.chunk;
+                if (chunkText.includes("[TOTAL_TIME:")) {
+                   chunkText = chunkText.split("[TOTAL_TIME:")[0];
+                }
+                
+                fullContent += chunkText;
+                setMessages(prev => {
+                  const newMsgs = [...prev];
+                  newMsgs[newMsgs.length - 1].content = fullContent;
+                  return newMsgs;
+                });
+              }
+            } catch (e) {
+              // ignore partial parse errors if any
+            }
+          }
+        }
+      }
+
+      // Read remaining buffer if any
+      if (streamBuffer.startsWith("data: ")) {
+        const dataStr = streamBuffer.slice(6);
+        try {
+          const data = JSON.parse(dataStr);
+          if (data.chunk) {
+            fullContent += data.chunk;
+          }
+        } catch (e) {}
+      }
+
+      // Extract JSON and Time
+      const jsonMatch = fullContent.match(/```json\n([\s\S]*?)\n```/);
+      const timeMatch = fullContent.match(/\[TOTAL_TIME:(.*?)s\]/);
+      const timeStr = timeMatch ? timeMatch[1] : "?";
+
+      if (jsonMatch && jsonMatch[1]) {
+        const parsedOutline = JSON.parse(jsonMatch[1]);
+        if (parsedOutline.outline) {
+          setFlatOutline(parsedOutline.outline);
+          setExpandedIds(new Set(parsedOutline.outline.filter((n: any) => n.level === 1).map((n: any) => n.id)));
+          
+          setMessages(prev => [...prev, { 
+            role: "assistant", 
+            content: `✅ 大纲重构完成！左侧 Word 结构树已自动更新。思考与生成共耗时：${timeStr} 秒。` 
+          }]);
+        }
+      } else {
+        throw new Error("模型未返回有效的 JSON 大纲数据");
+      }
+    } catch (error: any) {
+      console.error(error);
       setMessages(prev => [...prev, { 
         role: "assistant", 
-        content: "我已同步对比招标文件要求与底稿目录。建议在第二章增加‘国产化适配’小节以满足甲方第 4.2 条要求。是否自动插入？" 
+        content: `❌ 大纲重构失败: ${error.message}` 
       }]);
-    }, 1000);
+    } finally {
+      setIsCommanding(false);
+    }
   };
 
   const handleGenerate = async (chapterId: string) => {
@@ -299,6 +408,44 @@ export default function Dashboard() {
         newSet.delete(chapterId);
         return newSet;
       });
+    }
+  };
+
+  const handleExportOutline = async () => {
+    if (flatOutline.length === 0) {
+      setMessages(prev => [...prev, { role: "assistant", content: "⚠️ 当前没有大纲数据，无法导出。" }]);
+      return;
+    }
+    
+    setIsExporting(true);
+    setMessages(prev => [...prev, { role: "assistant", content: "⏳ 正在基于当前目录结构生成空白 Word 文档..." }]);
+    
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const response = await fetch(`${apiUrl}/export-outline`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ outline: flatOutline })
+      });
+      
+      if (!response.ok) throw new Error("导出失败");
+      
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = "投标文件_结构框架.docx";
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      
+      setMessages(prev => [...prev, { role: "assistant", content: "✅ Word 空白框架文档生成成功！已为您开始下载，它的目录和层级已经严格对标最新大纲。" }]);
+    } catch (error: any) {
+      console.error(error);
+      setMessages(prev => [...prev, { role: "assistant", content: `❌ 导出失败: ${error.message}` }]);
+    } finally {
+      setIsExporting(false);
     }
   };
 
@@ -379,7 +526,15 @@ export default function Dashboard() {
               <Upload size={16} />
               <span>更新底稿</span>
             </Button>
-            <Button size="sm" className="shadow-sm">导出最终稿</Button>
+            <Button 
+              size="sm" 
+              className="shadow-sm"
+              onClick={handleExportOutline}
+              disabled={isExporting}
+            >
+              {isExporting ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <FileText className="h-4 w-4 mr-2" />}
+              生成空白文档
+            </Button>
           </div>
         </header>
 
@@ -544,9 +699,9 @@ export default function Dashboard() {
               size="icon" 
               className="absolute right-1.5 top-1.5 h-9 w-9 rounded-lg bg-primary hover:bg-primary/90 shadow-sm"
               onClick={handleSendMessage}
-              disabled={!input.trim()}
+              disabled={!input.trim() || isCommanding}
             >
-              <Send size={16} className={!input.trim() ? "opacity-50" : ""} />
+              <Send size={16} className={(!input.trim() || isCommanding) ? "opacity-50" : ""} />
             </Button>
           </div>
           <p className="text-[10px] text-center text-slate-400 mt-3 uppercase tracking-widest font-semibold flex items-center justify-center gap-1.5">
