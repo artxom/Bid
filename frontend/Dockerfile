@@ -13,6 +13,8 @@ FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 # 生产环境通常需要环境变量
 ENV NEXT_TELEMETRY_DISABLED 1
 RUN npm run build

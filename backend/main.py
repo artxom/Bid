@@ -4,6 +4,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from docx import Document
 import uvicorn
 import io
+import asyncio
+import httpx
+import os
+from pydantic import BaseModel
+from typing import List, Optional
+from dotenv import load_dotenv
+
+# 加载环境变量
+load_dotenv()
 
 app = FastAPI(title="Bid Assistant API")
 
@@ -50,6 +59,72 @@ def get_outline_level(paragraph):
 @app.get("/")
 async def root():
     return {"message": "Bid Assistant API is running"}
+
+class SectionItem(BaseModel):
+    id: str
+    title: str
+    level: int
+    index: int
+    context: Optional[str] = ""
+
+class GenerateRequest(BaseModel):
+    sections: List[SectionItem]
+    global_guidelines: Optional[str] = ""
+
+MAX_CONCURRENCY = 5
+
+async def call_dify_workflow(section: SectionItem, global_guidelines: str, semaphore: asyncio.Semaphore) -> dict:
+    dify_url = os.getenv("DIFY_API_URL", "http://38.60.91.23/v1").rstrip("/") + "/workflows/run"
+    dify_key = os.getenv("DIFY_API_KEY", "")
+    
+    async with semaphore:
+        headers = {
+            "Authorization": f"Bearer {dify_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "inputs": {
+                "section_id": section.id,
+                "section_title": section.title,
+                "context": section.context,
+                "global_guidelines": global_guidelines
+            },
+            "response_mode": "blocking",
+            "user": "fastapi-backend"
+        }
+        
+        try:
+            # 延长超时时间，生成长文本可能需要更久
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                response = await client.post(dify_url, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                
+                # 解析 Dify 阻塞模式返回的数据结构
+                if "data" in data and "outputs" in data["data"] and "result" in data["data"]["outputs"]:
+                    result_str = data["data"]["outputs"]["result"]
+                    return {"section_id": section.id, "status": "success", "data": result_str}
+                else:
+                    return {"section_id": section.id, "status": "error", "error": f"Invalid Dify response: {data}"}
+        except httpx.HTTPStatusError as e:
+            return {"section_id": section.id, "status": "error", "error": f"HTTP Error {e.response.status_code}: {e.response.text}"}
+        except Exception as e:
+            return {"section_id": section.id, "status": "error", "error": str(e)}
+
+@app.post("/generate")
+async def generate_sections(request: GenerateRequest):
+    semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+    
+    tasks = []
+    for section in request.sections:
+        tasks.append(call_dify_workflow(section, request.global_guidelines, semaphore))
+        
+    results = await asyncio.gather(*tasks)
+    
+    return {
+        "status": "completed",
+        "results": results
+    }
 
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):

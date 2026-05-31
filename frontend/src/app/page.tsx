@@ -27,6 +27,7 @@ interface OutlineItem {
   level: number;
   status?: "completed" | "in-progress" | "todo";
   children?: OutlineItem[];
+  content?: string;
 }
 
 interface Message {
@@ -140,6 +141,7 @@ export default function Dashboard() {
   const [uploading, setUploading] = useState(false);
   const [activeChapterId, setActiveChapterId] = useState<string>("2.1");
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set(["2"]));
+  const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -184,7 +186,8 @@ export default function Dashboard() {
     formData.append("file", file);
 
     try {
-      const response = await fetch("http://localhost:8000/upload", {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const response = await fetch(`${apiUrl}/upload`, {
         method: "POST",
         body: formData,
       });
@@ -231,6 +234,72 @@ export default function Dashboard() {
         content: "我已同步对比招标文件要求与底稿目录。建议在第二章增加‘国产化适配’小节以满足甲方第 4.2 条要求。是否自动插入？" 
       }]);
     }, 1000);
+  };
+
+  const handleGenerate = async (chapterId: string) => {
+    const chapter = flatOutline.find(c => c.id === chapterId);
+    if (!chapter) return;
+
+    setGeneratingIds(prev => new Set(prev).add(chapterId));
+    setMessages(prev => [...prev, {
+      role: "assistant",
+      content: `⏳ 正在为您智能扩写章节：${chapter.title}，这可能需要几十秒，请稍候...`
+    }]);
+
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const response = await fetch(`${apiUrl}/generate`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          sections: [{
+            id: chapter.id,
+            title: chapter.title,
+            level: chapter.level,
+            index: parseInt(chapter.id.split('.').pop() || '0') || 0,
+            context: ""
+          }],
+          global_guidelines: ""
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("生成请求失败");
+      }
+
+      const data = await response.json();
+      
+      if (data.results && data.results.length > 0 && data.results[0].status === "success") {
+        const generatedContent = data.results[0].data;
+        
+        setFlatOutline(prev => prev.map(item => 
+          item.id === chapterId 
+            ? { ...item, content: generatedContent, status: "completed" } 
+            : item
+        ));
+        
+        setMessages(prev => [...prev, {
+          role: "assistant",
+          content: `✅ 章节《${chapter.title}》扩写完成！`
+        }]);
+      } else {
+        throw new Error(data.results?.[0]?.error || "生成失败");
+      }
+    } catch (error: any) {
+      console.error("Generate error:", error);
+      setMessages(prev => [...prev, {
+        role: "assistant",
+        content: `❌ 生成章节《${chapter.title}》时出错: ${error.message}`
+      }]);
+    } finally {
+      setGeneratingIds(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(chapterId);
+        return newSet;
+      });
+    }
   };
 
   const currentChapter = flatOutline.find(item => item.id === activeChapterId);
@@ -385,16 +454,32 @@ export default function Dashboard() {
                 <Card className="border-slate-200 shadow-md overflow-hidden rounded-2xl">
                   <div className="bg-slate-50/80 px-5 py-3 border-b flex items-center justify-between">
                     <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">底稿内容预览 & AI 辅助填充</span>
-                    <Button variant="ghost" size="sm" className="h-8 text-xs gap-1.5 text-primary hover:bg-primary/10 font-medium">
-                      <Plus size={14} />
-                      AI 智能扩写本章
+                    <Button 
+                      variant="ghost" 
+                      size="sm" 
+                      className="h-8 text-xs gap-1.5 text-primary hover:bg-primary/10 font-medium"
+                      onClick={() => handleGenerate(activeChapterId)}
+                      disabled={generatingIds.has(activeChapterId)}
+                    >
+                      {generatingIds.has(activeChapterId) ? (
+                        <><Loader2 className="h-3.5 w-3.5 animate-spin" /> 生成中...</>
+                      ) : (
+                        <><Plus size={14} /> AI 智能扩写本章</>
+                      )}
                     </Button>
                   </div>
                   <CardContent className="p-8 bg-white">
                     <div className="prose prose-slate max-w-none">
                       <h4 className="text-slate-900 font-extrabold text-xl mb-6">{currentChapterTitle}</h4>
-                      <div className="text-slate-600 leading-relaxed min-h-[200px]">
-                        {activeChapterId === "2.1" ? (
+                      <div className="text-slate-600 leading-relaxed min-h-[200px] whitespace-pre-wrap">
+                        {generatingIds.has(activeChapterId) ? (
+                          <div className="flex flex-col items-center justify-center h-48 space-y-4 text-slate-400">
+                            <Loader2 className="h-8 w-8 animate-spin text-primary/60" />
+                            <p>AI 正在奋笔疾书，预计需要几十秒时间...</p>
+                          </div>
+                        ) : currentChapter?.content ? (
+                          <p>{currentChapter.content}</p>
+                        ) : activeChapterId === "2.1" ? (
                           <p>
                             本项目的整体架构遵循“高可用、可扩展、安全性”的设计原则。底座采用私有云部署，支撑上层业务应用。前端采用微前端架构，后端基于 Spring Cloud 微服务体系，实现业务解耦与敏捷交付...
                           </p>
