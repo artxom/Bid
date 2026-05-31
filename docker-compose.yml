@@ -4,7 +4,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     ports:
-      - "8001:8000"  # 外部访问 8001，内部容器仍是 8000
+      - "8001:8000"
     volumes:
       - ./backend:/app
     env_file:
@@ -20,7 +20,7 @@ services:
       args:
         - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8001}
     ports:
-      - "3001:3000"  # 外部访问 3001，内部容器仍是 3000
+      - "3001:3000"
     env_file:
       - .env
     environment:

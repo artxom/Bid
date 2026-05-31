@@ -4,7 +4,8 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel
 from typing import List
-
+import time
+from .logger import log_llm_request_async
 class OutlineItemModel(BaseModel):
     id: str
     title: str
@@ -63,6 +64,8 @@ For example:
 }}
 """
     
+    start_time = time.time()
+    
     # Generate content with structured output
     response = client.models.generate_content(
         model=actual_model_name,
@@ -73,16 +76,46 @@ For example:
         ),
     )
     
+    latency = time.time() - start_time
+    
+    usage_data = None
+    if hasattr(response, 'usage_metadata') and response.usage_metadata:
+        usage_data = {
+            "prompt_token_count": getattr(response.usage_metadata, 'prompt_token_count', 0),
+            "candidates_token_count": getattr(response.usage_metadata, 'candidates_token_count', 0),
+            "total_token_count": getattr(response.usage_metadata, 'total_token_count', 0)
+        }
+
     # Parse the response
     try:
         if not response.text:
             raise ValueError("Empty response from Gemini")
             
         result = json.loads(response.text)
+        
+        # Log request
+        log_llm_request_async(
+            scenario="outline_rewrite",
+            model_used=actual_model_name,
+            input_payload={"prompt": prompt},
+            output_payload=result,
+            latency=latency,
+            usage_data=usage_data
+        )
+        
         return result.get("outline", [])
     except Exception as e:
         print(f"Error parsing Gemini response: {e}")
-        print(f"Raw response: {response.text}")
+        print(f"Raw response: {response.text if hasattr(response, 'text') else str(response)}")
+        
+        log_llm_request_async(
+            scenario="outline_rewrite_error",
+            model_used=actual_model_name,
+            input_payload={"prompt": prompt},
+            output_payload={"error": str(e), "raw_response": response.text if hasattr(response, 'text') else str(response)},
+            latency=latency,
+            usage_data=usage_data
+        )
         raise e
 
 import time
@@ -149,9 +182,32 @@ Provide your step-by-step reasoning first. Then, you MUST output the final outli
         ),
     )
     
+    full_response = ""
+    usage_data = None
+    
     async for chunk in response_stream:
         if chunk.text:
             yield chunk.text
+            full_response += chunk.text
+            
+        if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
+            # The final chunk usually contains the total usage metadata
+            usage_data = {
+                "prompt_token_count": getattr(chunk.usage_metadata, 'prompt_token_count', 0),
+                "candidates_token_count": getattr(chunk.usage_metadata, 'candidates_token_count', 0),
+                "total_token_count": getattr(chunk.usage_metadata, 'total_token_count', 0)
+            }
             
     elapsed = time.time() - start_time
+    
+    # Log stream request
+    log_llm_request_async(
+        scenario="outline_rewrite_stream",
+        model_used=actual_model_name,
+        input_payload={"prompt": prompt},
+        output_payload={"response_text": full_response},
+        latency=elapsed,
+        usage_data=usage_data
+    )
+    
     yield f"\n\n[TOTAL_TIME:{elapsed:.1f}s]"

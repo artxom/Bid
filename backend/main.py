@@ -13,12 +13,14 @@ from typing import List, Optional
 from dotenv import load_dotenv
 import json
 from google import genai
+import time
 
 from services.commander import rewrite_outline_with_gemini, stream_rewrite_outline_with_gemini
 from services.docx_builder import rebuild_docx_from_outline
 from sqlalchemy.orm import Session
 from database import engine, get_db
 import models
+from services.logger import log_llm_request_async
 from fastapi import Depends
 
 # Initialize database
@@ -178,17 +180,55 @@ async def call_dify_workflow(section: SectionItem, global_guidelines: str, flash
             gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
             if gemini_key:
                 client = genai.Client(api_key=gemini_key)
-                prompt = f"请根据大纲标题和全局规范，为该章节生成具体的指导上下文，以便下游系统(如DeepSeek)有方向、机械地生成最终内容。\n\n章节标题: {section.title}\n已有上下文: {section.context}\n全局规范: {global_guidelines}\n\n请输出详尽、明确的指示和内容框架要点："
+                prompt = f"""请根据大纲标题和全局规范，为该章节生成极度详尽的指导上下文和内容骨架，以便下游系统(如DeepSeek)能够生成长篇幅、高质量的最终内容。
+
+章节标题: {section.title}
+已有上下文: {section.context}
+全局规范: {global_guidelines}
+
+核心要求:
+1. 强制扩充维度：将该章节拆分为至少3-5个具体的子话题或小节。
+2. 明确字数要求：在指导中明确要求下游模型在每个子话题上输出大量细节（例如“每个子点展开说明不少于300-500字”）。
+3. 丰富内容形式：明确指示哪些子话题适合用 Markdown 表格进行对比分析，哪些适合用 Mermaid 流程图展示业务逻辑。
+
+请输出详尽、明确的指示和内容框架要点："""
                 
-                # using aio for async generation
-                response = await client.aio.models.generate_content(
+                flash_start_time = time.time()
+                flash_response = client.models.generate_content(
                     model=flash_model or "gemini-2.5-flash",
-                    contents=prompt
+                    contents=prompt,
                 )
-                if response.text:
-                    detailed_context = response.text
+                flash_latency = time.time() - flash_start_time
+                
+                if flash_response.text:
+                    detailed_context = flash_response.text
+                    
+                flash_usage = None
+                if hasattr(flash_response, 'usage_metadata') and flash_response.usage_metadata:
+                    flash_usage = {
+                        "prompt_token_count": getattr(flash_response.usage_metadata, 'prompt_token_count', 0),
+                        "candidates_token_count": getattr(flash_response.usage_metadata, 'candidates_token_count', 0),
+                        "total_token_count": getattr(flash_response.usage_metadata, 'total_token_count', 0)
+                    }
+                    
+                log_llm_request_async(
+                    scenario="dify_pre_process",
+                    model_used=flash_model,
+                    input_payload={"prompt": prompt},
+                    output_payload={"generated_context": detailed_context},
+                    latency=flash_latency,
+                    usage_data=flash_usage
+                )
         except Exception as e:
             print(f"Error generating pre-context with Gemini: {e}")
+            log_llm_request_async(
+                scenario="dify_pre_process_error",
+                model_used=flash_model,
+                input_payload={"prompt": f"章节标题: {section.title}"},
+                output_payload={"error": str(e)},
+                latency=0.0,
+                usage_data=None
+            )
             # Fallback to the original context
         # ----------------------------------------------------
 
@@ -204,11 +244,23 @@ async def call_dify_workflow(section: SectionItem, global_guidelines: str, flash
         }
         
         try:
-            # 延长超时时间，生成长文本可能需要更久
-            async with httpx.AsyncClient(timeout=180.0) as client:
+            dify_start_time = time.time()
+            async with httpx.AsyncClient(timeout=300.0) as client:
                 response = await client.post(dify_url, headers=headers, json=payload)
+                dify_latency = time.time() - dify_start_time
                 response.raise_for_status()
                 data = response.json()
+                
+                dify_usage = data.get("data", {}).get("outputs", {}).get("usage", {})
+                
+                log_llm_request_async(
+                    scenario="dify_workflow",
+                    model_used="dify-api",
+                    input_payload=payload,
+                    output_payload=data,
+                    latency=dify_latency,
+                    usage_data=dify_usage
+                )
                 
                 # 解析 Dify 阻塞模式返回的数据结构
                 if "data" in data and "outputs" in data["data"] and "result" in data["data"]["outputs"]:

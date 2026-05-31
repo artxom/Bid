@@ -470,10 +470,13 @@ CRITICAL REQUIREMENTS:
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let streamBuffer = "";
-      let fullContent = "🧠 主脑思考中...\n\n";
+      let fullContent = "";
+      let chunkCount = 0;
+      let hasReceivedFirstChunk = false;
+      const startTime = Date.now();
 
-      // Append an empty assistant message that will be populated by the stream
-      setMessages(prev => [...prev, { role: "assistant", content: fullContent }]);
+      // Append a loading message
+      setMessages(prev => [...prev, { role: "assistant", content: "🚀 正在向 Gemini 发送重构请求..." }]);
 
       while (true) {
         const { done, value } = await reader.read();
@@ -491,18 +494,22 @@ CRITICAL REQUIREMENTS:
               const data = JSON.parse(dataStr);
               if (data.error) throw new Error(data.error);
               if (data.chunk) {
-                // Filter out the internal time tag from displaying to user
-                let chunkText = data.chunk;
-                if (chunkText.includes("[TOTAL_TIME:")) {
-                   chunkText = chunkText.split("[TOTAL_TIME:")[0];
+                fullContent += data.chunk;
+                chunkCount++;
+                if (!hasReceivedFirstChunk) {
+                  hasReceivedFirstChunk = true;
                 }
                 
-                fullContent += chunkText;
-                setMessages(prev => {
-                  const newMsgs = [...prev];
-                  newMsgs[newMsgs.length - 1].content = fullContent;
-                  return newMsgs;
-                });
+                // update the loading animation every few chunks
+                if (chunkCount % 3 === 0 || chunkCount === 1) {
+                   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                   const charCount = fullContent.length;
+                   setMessages(prev => {
+                     const newMsgs = [...prev];
+                     newMsgs[newMsgs.length - 1].content = `🧠 Gemini 正在分析重构中...\n\n⏱️ 已耗时: ${elapsed} 秒\n📊 已接收: 约 ${charCount} 个字符 (流式持续接收中...)`;
+                     return newMsgs;
+                   });
+                }
               }
             } catch (e) {
               // ignore partial parse errors if any
@@ -533,20 +540,26 @@ CRITICAL REQUIREMENTS:
           setFlatOutline(parsedOutline.outline);
           setExpandedIds(new Set(parsedOutline.outline.filter((n: any) => n.level === 1).map((n: any) => n.id)));
           
-          setMessages(prev => [...prev, { 
-            role: "assistant", 
-            content: `✅ 大纲重构完成！左侧 Word 结构树已自动更新。思考与生成共耗时：${timeStr} 秒。` 
-          }]);
+          setMessages(prev => {
+            const newMsgs = [...prev];
+            newMsgs[newMsgs.length - 1].content = `✅ 大纲重构完成！左侧 Word 结构树已自动更新。思考与生成共耗时：${timeStr} 秒。`;
+            return newMsgs;
+          });
         }
       } else {
         throw new Error("模型未返回有效的 JSON 大纲数据");
       }
     } catch (error: any) {
       console.error(error);
-      setMessages(prev => [...prev, { 
-        role: "assistant", 
-        content: `❌ 大纲重构失败: ${error.message}` 
-      }]);
+      setMessages(prev => {
+        const newMsgs = [...prev];
+        if (newMsgs.length > 0 && newMsgs[newMsgs.length - 1].role === "assistant" && newMsgs[newMsgs.length - 1].content.includes("Gemini")) {
+          newMsgs[newMsgs.length - 1].content = `❌ 大纲重构失败: ${error.message}`;
+        } else {
+          newMsgs.push({ role: "assistant", content: `❌ 大纲重构失败: ${error.message}` });
+        }
+        return newMsgs;
+      });
     } finally {
       setIsCommanding(false);
     }
@@ -596,7 +609,7 @@ CRITICAL REQUIREMENTS:
   return (
     <div className="flex h-screen w-full bg-slate-50/50 overflow-hidden font-sans fixed inset-0">
       {/* 左侧栏：可折叠大纲树 */}
-      <aside className="w-72 border-r bg-white flex flex-col min-h-0">
+      <aside className="w-80 min-w-[200px] max-w-[50vw] border-r bg-white flex flex-col min-h-0 resize-x overflow-x-hidden">
         <div className="p-4 border-b flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
             <div className="bg-primary text-white p-1.5 rounded-md shadow-sm">
@@ -622,7 +635,15 @@ CRITICAL REQUIREMENTS:
               <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
                 Word 目录结构
               </h2>
-              <Badge variant="outline" className="text-[10px] h-4 px-1.5 bg-slate-50 text-slate-500 border-slate-200 font-normal">严格对标</Badge>
+              <div className="flex items-center gap-1">
+                <Button variant="ghost" size="icon" className="h-5 w-5 text-slate-400 hover:text-slate-600" title="全部展开" onClick={() => setExpandedIds(new Set(flatOutline.map(i => i.id)))}>
+                  <ChevronDown size={12} />
+                </Button>
+                <Button variant="ghost" size="icon" className="h-5 w-5 text-slate-400 hover:text-slate-600" title="全部折叠" onClick={() => setExpandedIds(new Set())}>
+                  <ChevronRight size={12} />
+                </Button>
+                <Badge variant="outline" className="text-[10px] h-4 px-1.5 bg-slate-50 text-slate-500 border-slate-200 font-normal ml-1">严格对标</Badge>
+              </div>
             </div>
             {treeOutline.map((item) => (
               <TreeItem 
@@ -892,7 +913,7 @@ CRITICAL REQUIREMENTS:
           <div className="p-4 space-y-5 pb-4">
             {messages.map((m, idx) => (
               <div key={idx} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm shadow-sm leading-relaxed ${
+                <div className={`whitespace-pre-wrap max-w-[85%] rounded-2xl px-4 py-3 text-sm shadow-sm leading-relaxed ${
                   m.role === 'user' 
                   ? 'bg-primary text-white rounded-tr-sm' 
                   : 'bg-white border border-slate-100 text-slate-700 rounded-tl-sm'
