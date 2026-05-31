@@ -12,7 +12,8 @@ import {
   Search,
   Send,
   CheckCircle2,
-  Loader2
+  Loader2,
+  Play, Pause, XCircle, RefreshCw, X, AlertCircle
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -28,6 +29,13 @@ interface OutlineItem {
   status?: "completed" | "in-progress" | "todo";
   children?: OutlineItem[];
   content?: string;
+}
+
+export interface GenTask {
+  chapterId: string;
+  status: "queued" | "generating" | "success" | "error";
+  error?: string;
+  abortController?: AbortController;
 }
 
 interface Message {
@@ -65,14 +73,17 @@ const TreeItem = ({
   activeId, 
   onSelect, 
   expandedIds, 
-  toggleExpand 
+  toggleExpand,
+  taskQueue
 }: { 
   item: OutlineItem; 
   activeId: string; 
   onSelect: (id: string) => void;
   expandedIds: Set<string>;
   toggleExpand: (id: string) => void;
+  taskQueue: Record<string, GenTask>;
 }) => {
+  const task = taskQueue[item.id];
   const hasChildren = item.children && item.children.length > 0;
   const isExpanded = expandedIds.has(item.id);
   const isActive = activeId === item.id;
@@ -101,7 +112,10 @@ const TreeItem = ({
         <span className={`truncate flex-1 text-sm font-medium ${item.level === 1 ? 'font-semibold' : ''}`}>
           {item.title}
         </span>
-        {item.status === 'completed' && <CheckCircle2 size={12} className="text-emerald-500 shrink-0" />}
+        {task?.status === 'generating' && <Loader2 size={12} className="text-primary animate-spin shrink-0" />}
+        {task?.status === 'queued' && <RefreshCw size={12} className="text-slate-400 shrink-0" />}
+        {task?.status === 'error' && <AlertCircle size={12} className="text-red-500 shrink-0" />}
+        {(item.status === 'completed' || task?.status === 'success') && <CheckCircle2 size={12} className="text-emerald-500 shrink-0" />}
       </div>
       
       {hasChildren && isExpanded && (
@@ -114,6 +128,7 @@ const TreeItem = ({
               onSelect={onSelect} 
               expandedIds={expandedIds} 
               toggleExpand={toggleExpand} 
+              taskQueue={taskQueue}
             />
           ))}
         </div>
@@ -142,7 +157,10 @@ export default function Dashboard() {
   const [isCommanding, setIsCommanding] = useState(false);
   const [activeChapterId, setActiveChapterId] = useState<string>("2.1");
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set(["2"]));
-  const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
+  const [taskQueue, setTaskQueue] = useState<Record<string, GenTask>>({});
+  const [isTaskPanelOpen, setIsTaskPanelOpen] = useState(false);
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const MAX_CONCURRENT_TASKS = 3;
   const [isExporting, setIsExporting] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -151,6 +169,146 @@ export default function Dashboard() {
   const [uploadType, setUploadType] = useState<"tender" | "draft">("tender");
 
   const treeOutline = useMemo(() => buildTree(flatOutline), [flatOutline]);
+
+  useEffect(() => {
+    const fetchLatestProject = async () => {
+      try {
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+        const response = await fetch(`${apiUrl}/project/latest`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.status === "success") {
+            setProjectId(data.project_id);
+            if (data.outline && data.outline.length > 0) {
+              setFlatOutline(data.outline);
+              setExpandedIds(new Set(data.outline.filter((n: any) => n.level === 1).map((n: any) => n.id)));
+              setMessages(prev => [...prev, { 
+                role: "assistant", 
+                content: `✅ 已为您恢复最近的工作项目：《${data.filename}》` 
+              }]);
+            }
+          }
+        }
+      } catch (e) {
+        console.error("Failed to load latest project", e);
+      }
+    };
+    fetchLatestProject();
+  }, []);
+
+
+  const getLeafNodes = (outline: OutlineItem[], rootId: string): OutlineItem[] => {
+    const rootIndex = outline.findIndex(item => item.id === rootId);
+    if (rootIndex === -1) return [];
+    const rootItem = outline[rootIndex];
+    const descendants: OutlineItem[] = [];
+    for (let i = rootIndex + 1; i < outline.length; i++) {
+      if (outline[i].level <= rootItem.level) break;
+      descendants.push(outline[i]);
+    }
+    if (descendants.length === 0) return [rootItem];
+    const leaves: OutlineItem[] = [];
+    for (let i = 0; i < descendants.length; i++) {
+      const current = descendants[i];
+      const next = descendants[i + 1];
+      if (!next || next.level <= current.level) {
+        leaves.push(current);
+      }
+    }
+    return leaves;
+  };
+
+  const enqueueGeneration = (chapterId: string) => {
+    const leaves = getLeafNodes(flatOutline, chapterId);
+    setTaskQueue(prev => {
+      const newQueue = { ...prev };
+      leaves.forEach(leaf => {
+        if (!newQueue[leaf.id] || newQueue[leaf.id].status === 'error') {
+          newQueue[leaf.id] = { chapterId: leaf.id, status: 'queued' };
+        }
+      });
+      return newQueue;
+    });
+    setMessages(prev => [...prev, {
+      role: "assistant",
+      content: `⏳ 已将《${flatOutline.find(c => c.id === chapterId)?.title}》及其子章节共 ${leaves.length} 个任务加入生成队列。`
+    }]);
+    setIsTaskPanelOpen(true);
+  };
+
+  const cancelTask = (chapterId: string) => {
+    setTaskQueue(prev => {
+      const newQ = { ...prev };
+      const task = newQ[chapterId];
+      if (task?.abortController) {
+        task.abortController.abort();
+      }
+      delete newQ[chapterId];
+      return newQ;
+    });
+  };
+
+  useEffect(() => {
+    const processQueue = async () => {
+      const tasks = Object.values(taskQueue);
+      const generatingCount = tasks.filter(t => t.status === 'generating').length;
+      if (generatingCount >= MAX_CONCURRENT_TASKS) return;
+      
+      const queuedTask = tasks.find(t => t.status === 'queued');
+      if (!queuedTask) return;
+      
+      const controller = new AbortController();
+      setTaskQueue(prev => ({
+        ...prev,
+        [queuedTask.chapterId]: { ...prev[queuedTask.chapterId], status: 'generating', abortController: controller }
+      }));
+      
+      const chapter = flatOutline.find(c => c.id === queuedTask.chapterId);
+      if (!chapter) {
+        setTaskQueue(prev => ({ ...prev, [queuedTask.chapterId]: { ...prev[queuedTask.chapterId], status: 'error', error: 'Chapter not found' } }));
+        return;
+      }
+      
+      try {
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+        const response = await fetch(`${apiUrl}/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            sections: [{ id: chapter.id, title: chapter.title, level: chapter.level, index: parseInt(chapter.id.split('.').pop() || '0') || 0, context: "" }],
+            global_guidelines: ""
+          }),
+        });
+
+        if (!response.ok) throw new Error("生成请求失败");
+        const data = await response.json();
+        
+        if (data.results && data.results.length > 0 && data.results[0].status === "success") {
+          const generatedContent = data.results[0].data;
+          setFlatOutline(prev => {
+            const updated = prev.map(item => item.id === chapter.id ? { ...item, content: generatedContent, status: "completed" as const } : item);
+            if (projectId) {
+              fetch(`${apiUrl}/project/${projectId}/outline`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ outline: updated })
+              }).catch(e => console.error("Sync failed", e));
+            }
+            return updated;
+          });
+          setTaskQueue(prev => ({ ...prev, [chapter.id]: { ...prev[chapter.id], status: "success" } }));
+        } else {
+          throw new Error(data.results?.[0]?.error || "生成失败");
+        }
+      } catch (error: any) {
+        if (error.name !== "AbortError") {
+           setTaskQueue(prev => ({ ...prev, [chapter.id]: { ...prev[chapter.id], status: "error", error: error.message } }));
+        }
+      }
+    };
+    processQueue();
+  }, [taskQueue, flatOutline, projectId]);
 
   const toggleExpand = (id: string) => {
     const newExpanded = new Set(expandedIds);
@@ -199,6 +357,7 @@ export default function Dashboard() {
       const data = await response.json();
       
       if (uploadType === "draft") {
+        if (data.project_id) setProjectId(data.project_id);
         setFlatOutline(data.outline);
         // 默认展开所有一级节点
         setExpandedIds(new Set(data.outline.filter((n: OutlineItem) => n.level === 1).map((n: OutlineItem) => n.id)));
@@ -345,72 +504,6 @@ export default function Dashboard() {
     }
   };
 
-  const handleGenerate = async (chapterId: string) => {
-    const chapter = flatOutline.find(c => c.id === chapterId);
-    if (!chapter) return;
-
-    setGeneratingIds(prev => new Set(prev).add(chapterId));
-    setMessages(prev => [...prev, {
-      role: "assistant",
-      content: `⏳ 正在为您智能扩写章节：${chapter.title}，这可能需要几十秒，请稍候...`
-    }]);
-
-    try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const response = await fetch(`${apiUrl}/generate`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          sections: [{
-            id: chapter.id,
-            title: chapter.title,
-            level: chapter.level,
-            index: parseInt(chapter.id.split('.').pop() || '0') || 0,
-            context: ""
-          }],
-          global_guidelines: ""
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("生成请求失败");
-      }
-
-      const data = await response.json();
-      
-      if (data.results && data.results.length > 0 && data.results[0].status === "success") {
-        const generatedContent = data.results[0].data;
-        
-        setFlatOutline(prev => prev.map(item => 
-          item.id === chapterId 
-            ? { ...item, content: generatedContent, status: "completed" } 
-            : item
-        ));
-        
-        setMessages(prev => [...prev, {
-          role: "assistant",
-          content: `✅ 章节《${chapter.title}》扩写完成！`
-        }]);
-      } else {
-        throw new Error(data.results?.[0]?.error || "生成失败");
-      }
-    } catch (error: any) {
-      console.error("Generate error:", error);
-      setMessages(prev => [...prev, {
-        role: "assistant",
-        content: `❌ 生成章节《${chapter.title}》时出错: ${error.message}`
-      }]);
-    } finally {
-      setGeneratingIds(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(chapterId);
-        return newSet;
-      });
-    }
-  };
-
   const handleExportOutline = async () => {
     if (flatOutline.length === 0) {
       setMessages(prev => [...prev, { role: "assistant", content: "⚠️ 当前没有大纲数据，无法导出。" }]);
@@ -491,6 +584,7 @@ export default function Dashboard() {
                 onSelect={setActiveChapterId} 
                 expandedIds={expandedIds}
                 toggleExpand={toggleExpand}
+                taskQueue={taskQueue}
               />
             ))}
             <Button variant="outline" className="w-full justify-start gap-2 border-dashed mt-4 text-slate-500 hover:text-slate-700 hover:border-slate-300">
@@ -613,10 +707,10 @@ export default function Dashboard() {
                       variant="ghost" 
                       size="sm" 
                       className="h-8 text-xs gap-1.5 text-primary hover:bg-primary/10 font-medium"
-                      onClick={() => handleGenerate(activeChapterId)}
-                      disabled={generatingIds.has(activeChapterId)}
+                      onClick={() => enqueueGeneration(activeChapterId)}
+                      disabled={(taskQueue[activeChapterId]?.status === 'generating' || taskQueue[activeChapterId]?.status === 'queued')}
                     >
-                      {generatingIds.has(activeChapterId) ? (
+                      {(taskQueue[activeChapterId]?.status === 'generating' || taskQueue[activeChapterId]?.status === 'queued') ? (
                         <><Loader2 className="h-3.5 w-3.5 animate-spin" /> 生成中...</>
                       ) : (
                         <><Plus size={14} /> AI 智能扩写本章</>
@@ -627,7 +721,7 @@ export default function Dashboard() {
                     <div className="prose prose-slate max-w-none">
                       <h4 className="text-slate-900 font-extrabold text-xl mb-6">{currentChapterTitle}</h4>
                       <div className="text-slate-600 leading-relaxed min-h-[200px] whitespace-pre-wrap">
-                        {generatingIds.has(activeChapterId) ? (
+                        {(taskQueue[activeChapterId]?.status === 'generating' || taskQueue[activeChapterId]?.status === 'queued') ? (
                           <div className="flex flex-col items-center justify-center h-48 space-y-4 text-slate-400">
                             <Loader2 className="h-8 w-8 animate-spin text-primary/60" />
                             <p>AI 正在奋笔疾书，预计需要几十秒时间...</p>
@@ -649,7 +743,80 @@ export default function Dashboard() {
             </div>
           </div>
         </ScrollArea>
-      </main>
+      
+      {/* 任务监控悬浮窗与按钮 (Bottom Right Drawer) */}
+      <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3">
+        {isTaskPanelOpen && (
+          <div className="w-80 bg-white rounded-xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col h-[400px] animate-in slide-in-from-bottom-5">
+            <div className="bg-slate-800 text-white px-4 py-3 flex items-center justify-between shrink-0 shadow-sm">
+              <h3 className="font-semibold text-sm flex items-center gap-2">
+                <RefreshCw size={14} className={Object.values(taskQueue).some(t => t.status === 'generating') ? "animate-spin-slow" : ""} />
+                并发任务队列 ({Object.values(taskQueue).filter(t => t.status === 'generating').length}/{MAX_CONCURRENT_TASKS})
+              </h3>
+              <Button variant="ghost" size="icon" className="h-6 w-6 text-slate-300 hover:text-white hover:bg-slate-700 rounded-full" onClick={() => setIsTaskPanelOpen(false)}>
+                <X size={14} />
+              </Button>
+            </div>
+            <ScrollArea className="flex-1 p-0 bg-slate-50">
+              {Object.values(taskQueue).length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full p-6 text-slate-400 text-sm gap-2">
+                  <CheckCircle2 size={32} className="text-slate-300 opacity-50" />
+                  <span>暂无运行中的生成任务</span>
+                </div>
+              ) : (
+                <ul className="divide-y divide-slate-100 bg-white">
+                  {Object.values(taskQueue).map(task => {
+                    const chapter = flatOutline.find(c => c.id === task.chapterId);
+                    return (
+                      <li key={task.chapterId} className="px-4 py-3 flex items-center justify-between hover:bg-slate-50/80 transition-colors group">
+                        <div className="flex items-center gap-3 overflow-hidden flex-1 mr-2">
+                          <div className="shrink-0">
+                            {task.status === 'generating' && <Loader2 size={16} className="text-blue-500 animate-spin" />}
+                            {task.status === 'queued' && <RefreshCw size={16} className="text-slate-300" />}
+                            {task.status === 'success' && <CheckCircle2 size={16} className="text-emerald-500" />}
+                            {task.status === 'error' && <AlertCircle size={16} className="text-rose-500" />}
+                          </div>
+                          <span className="text-[13px] font-medium text-slate-700 truncate" title={chapter?.title || task.chapterId}>
+                            {chapter?.title || task.chapterId}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                          {task.status === 'error' && (
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-slate-400 hover:text-blue-600 hover:bg-blue-50" onClick={() => enqueueGeneration(task.chapterId)} title="重试">
+                              <RefreshCw size={14} />
+                            </Button>
+                          )}
+                          {(task.status === 'generating' || task.status === 'queued') && (
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-slate-400 hover:text-rose-600 hover:bg-rose-50" onClick={() => cancelTask(task.chapterId)} title="取消">
+                              <XCircle size={14} />
+                            </Button>
+                          )}
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </ScrollArea>
+          </div>
+        )}
+        
+        {!isTaskPanelOpen && (
+          <Button 
+            className="h-12 w-12 rounded-full shadow-xl bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 relative overflow-hidden" 
+            onClick={() => setIsTaskPanelOpen(true)}
+          >
+            <RefreshCw size={20} className={Object.values(taskQueue).some(t => t.status === 'generating') ? "animate-spin-slow" : ""} />
+            {Object.values(taskQueue).length > 0 && (
+              <span className="absolute top-0 right-0 h-3.5 w-3.5 bg-rose-500 rounded-full flex items-center justify-center text-[9px] font-bold border-2 border-slate-800">
+                {Object.values(taskQueue).length}
+              </span>
+            )}
+          </Button>
+        )}
+      </div>
+</main>
+
 
       {/* 右侧栏：AI 对话 */}
       <aside className="w-80 border-l bg-white flex flex-col shadow-[0_0_40px_-15px_rgba(0,0,0,0.1)] z-10 min-h-0">

@@ -15,6 +15,13 @@ import json
 
 from services.commander import rewrite_outline_with_gemini, stream_rewrite_outline_with_gemini
 from services.docx_builder import rebuild_docx_from_outline
+from sqlalchemy.orm import Session
+from database import engine, get_db
+import models
+from fastapi import Depends
+
+# Initialize database
+models.Base.metadata.create_all(bind=engine)
 
 # 加载环境变量
 load_dotenv()
@@ -113,12 +120,17 @@ class RewriteRequest(BaseModel):
     active_chapter_id: Optional[str] = None
 
 MAX_CONCURRENCY = 5
+global_dify_semaphore = None
 
-async def call_dify_workflow(section: SectionItem, global_guidelines: str, semaphore: asyncio.Semaphore) -> dict:
+async def call_dify_workflow(section: SectionItem, global_guidelines: str) -> dict:
+    global global_dify_semaphore
+    if global_dify_semaphore is None:
+        global_dify_semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+        
     dify_url = os.getenv("DIFY_API_URL", "http://38.60.91.23/v1").rstrip("/") + "/workflows/run"
     dify_key = os.getenv("DIFY_API_KEY", "")
     
-    async with semaphore:
+    async with global_dify_semaphore:
         headers = {
             "Authorization": f"Bearer {dify_key}",
             "Content-Type": "application/json"
@@ -154,11 +166,9 @@ async def call_dify_workflow(section: SectionItem, global_guidelines: str, semap
 
 @app.post("/generate")
 async def generate_sections(request: GenerateRequest):
-    semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
-    
     tasks = []
     for section in request.sections:
-        tasks.append(call_dify_workflow(section, request.global_guidelines, semaphore))
+        tasks.append(call_dify_workflow(section, request.global_guidelines))
         
     results = await asyncio.gather(*tasks)
     
@@ -231,7 +241,7 @@ async def rewrite_stream(request: RewriteRequest):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.post("/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db)):
     content = await file.read()
     doc = Document(io.BytesIO(content))
     
@@ -249,12 +259,48 @@ async def upload_document(file: UploadFile = File(...)):
                 "level": level,
                 "index": i # 保留原始段落索引
             })
+            
+    # Save to database
+    db_project = models.Project(
+        filename=file.filename,
+        outline=flat_outline
+    )
+    db.add(db_project)
+    db.commit()
+    db.refresh(db_project)
     
     return {
-        "filename": file.filename, 
+        "project_id": db_project.id,
+        "filename": db_project.filename, 
         "status": "processed",
         "outline": flat_outline
     }
+
+
+@app.get("/project/latest")
+async def get_latest_project(db: Session = Depends(get_db)):
+    project = db.query(models.Project).order_by(models.Project.updated_at.desc()).first()
+    if not project:
+        return {"status": "empty"}
+    return {
+        "status": "success",
+        "project_id": project.id,
+        "filename": project.filename,
+        "outline": project.outline
+    }
+
+class UpdateOutlineRequest(BaseModel):
+    outline: List[dict]
+
+@app.put("/project/{project_id}/outline")
+async def update_project_outline(project_id: str, request: UpdateOutlineRequest, db: Session = Depends(get_db)):
+    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if not project:
+        return {"status": "error", "error": "Project not found"}
+        
+    project.outline = request.outline
+    db.commit()
+    return {"status": "success"}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
