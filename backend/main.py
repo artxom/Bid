@@ -25,15 +25,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 匹配标题编号的正则，例如 1.1, 1.1.1, 第一章, 一、 等
-TITLE_RE = re.compile(r'^(\d+(\.\d+)*|第[一二三四五六七八九十]+[章节]|[\u2460-\u2469]|[一二三四五六七八九十]+[、])')
+# 匹配更精确的标题格式
+TITLE_RE = re.compile(
+    r'^('
+    r'第[一二三四五六七八九十百零]+[章节篇部分]|'  # 第X章
+    r'[一二三四五六七八九十百]+[、\.]\s*|'       # 一、
+    r'\d+\.\d+(\.\d+)*\s+|'                    # 1.1 或 1.1.1 
+    r'\d+[、\.]\s+'                            # 1、或 1. 
+    r')'
+)
 
 def get_outline_level(paragraph):
     """尝试获取段落的大纲级别"""
+    text = paragraph.text.strip()
+    if not text:
+        return None
+        
+    style_name = paragraph.style.name.lower()
+    
+    # 0. 忽略目录 (TOC)
+    if style_name.startswith('toc') or 'toc' in style_name:
+        return None
+        
     # 1. 检查样式名
-    if paragraph.style.name.startswith('Heading'):
+    if style_name.startswith('heading'):
         try:
-            return int(paragraph.style.name.split(' ')[-1])
+            return int(style_name.split(' ')[-1])
+        except (ValueError, IndexError):
+            pass
+            
+    if style_name.startswith('标题'):
+        try:
+            return int(style_name.split(' ')[-1])
         except (ValueError, IndexError):
             pass
     
@@ -41,19 +64,27 @@ def get_outline_level(paragraph):
     p_pr = paragraph._element.get_or_add_pPr()
     outline_lvl = p_pr.xpath('./w:outlineLvl')
     if outline_lvl:
-        return int(outline_lvl[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')) + 1
+        try:
+            val = int(outline_lvl[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val'))
+            if val < 9: # 9 表示正文 (body text)
+                return val + 1
+        except (ValueError, TypeError):
+            pass
     
-    # 3. 如果文本符合标题正则，尝试根据点号数量推断级别
-    text = paragraph.text.strip()
-    match = TITLE_RE.match(text)
-    if match:
-        dot_count = text.split(' ')[0].count('.')
-        if dot_count > 0:
-            return dot_count + 1
-        if '章' in text:
-            return 1
-        return 2 # 默认二级
-        
+    # 3. 如果文本较短且符合标题正则，尝试根据前缀推断级别
+    if len(text) < 100:
+        match = TITLE_RE.match(text)
+        if match:
+            if re.match(r'^第[一二三四五六七八九十百零]+[章节篇部分]', text):
+                return 1
+            if re.match(r'^[一二三四五六七八九十百]+[、\.]', text):
+                return 2
+            num_match = re.match(r'^(\d+(?:\.\d+)+)', text)
+            if num_match:
+                return num_match.group(1).count('.') + 1
+            if re.match(r'^\d+[、\.]', text):
+                return 3
+                
     return None
 
 @app.get("/")
