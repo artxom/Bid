@@ -20,5 +20,6 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             cd /home/root/Bid
-            git pull origin main
-            docker-compose up -d --build
+            git fetch origin main
+            git reset --hard origin/main
+            docker compose up -d --build
