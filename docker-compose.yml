@@ -4,7 +4,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     ports:
-      - "8000:8000"
+      - "8001:8000"  # 外部访问 8001，内部容器仍是 8000
     volumes:
       - ./backend:/app
     environment:
@@ -16,9 +16,9 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "3001:3000"  # 外部访问 3001，内部容器仍是 3000
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_API_URL=http://localhost:8001
     depends_on:
       - backend
     restart: always
