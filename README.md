@@ -6,15 +6,18 @@
 
 系统采用高度解耦的双层并发架构，充分发挥不同 LLM 的优势，并有效控制成本与速度：
 
-- **Commander (主脑)：基于 FastAPI + Gemini Pro**
+- **Commander (主脑)：基于 FastAPI + Gemini Pro (支持模型配置)**
   - **职责**：全局理解、任务拆解与并发调度。
-  - **流程**：解析标书目录树 -> 结合用户意图生成“调度清单” -> 挂载上下文 -> 并发触发多个执行者任务。
+  - **流程**：解析标书目录树 -> 结合用户意图使用高智力的 `Pro` 模型生成“调度清单” -> 挂载上下文 -> 并发触发多个执行者任务。
   - **优势**：利用高智力模型把控整体逻辑一致性。
 
-- **Executor (执行者)：基于 Dify Workflow + DeepSeek**
+- **Executor (执行者)：基于 Gemini Flash + Dify Workflow + 任意推理模型 (如 DeepSeek)**
   - **职责**：细分章节内容的填充与多模态元素的生成。
-  - **流程**：接收 Commander 传来的单章节上下文和指令 -> 执行检索/生成 -> 按照“多模态内容协议”返回 JSON 格式结果。
-  - **优势**：极大地提高了长文本生成的并发速度，同时通过工作流实现了高度定制化的 Prompt 节点。
+  - **流程**：
+    1. **智能预处理**：后端拦截单章节上下文，先通过速度快、成本低的 `Flash` 模型生成具有强引导性的结构化指令。
+    2. **工作流执行**：将结构化指令发往 Dify 工作流，由 DeepSeek 等推理模型执行高并发的具体内容生成。
+    3. **净化器**：后端接收返回结果，精准拦截并切除模型的 `<think>` 思维链标签，确保输出纯净的 JSON 协议数据。
+  - **优势**：极大地提高了长文本生成的并发速度，并在降低成本的同时通过预处理解决了推理模型易“跑偏”的缺点。
 
 ## 多模态内容协议 (Content Protocol)
 
@@ -43,18 +46,21 @@
 }
 ```
 
-### 解析与组装策略
-1. **纯文本 (`text`)**：直接通过 `python-docx` 添加段落。
-2. **表格 (`table/markdown`)**：后端解析 Markdown 语法，使用 `python-docx` 创建原生 Word 表格。
-3. **图表 (`chart/mermaid`)**：后端调用 `mermaid.ink`（或本地 `mermaid-cli`）将代码转换为 PNG 图片，然后插入文档。
+### 解析与组装策略 (高容错设计)
+1. **优先解析 JSON / 智能降级 Markdown**：系统优先尝试将 Dify 的返回值解析为标准 JSON；若解析失败，则自动降级为 Markdown 解析模式，通过正则表达式分离文本、表格和代码块，极大提升了模型生成的容错率。
+2. **纯文本 (`text`)**：直接通过 `python-docx` 添加段落。
+3. **表格 (`table/markdown`)**：后端解析 Markdown 语法，使用 `python-docx` 绘制带有 `Table Grid` 样式的原生 Word 表格。
+4. **图表 (`chart/mermaid`)**：后端调用云端渲染引擎 `kroki.io`，将 Mermaid 代码经 Zlib+Base64 压缩后转换为高清 PNG 图片插入文档中。
 
 ## 技术栈
 
-- **前端**：Next.js + Tailwind CSS + shadcn/ui
-- **后端**：FastAPI + python-docx (异步调度，并发控制)
-- **AI 编排**：Dify
+- **前端**：Next.js + Tailwind CSS + shadcn/ui + react-markdown
+- **后端**：FastAPI + python-docx + SQLAlchemy (SQLite)
+- **AI 编排**：Dify + DeepSeek / Gemini Pro
 - **环境部署**：Docker Compose
 
 ## 状态管理与并发控制
 
-为了保证并发请求的稳定性，后端引入了信号量 (Semaphore) 限制最高并发数。针对每一章节的任务状态流转（`PENDING` -> `RUNNING` -> `SUCCESS` / `FAILED`），系统提供实时反馈接口供前端进度条读取，并支持单章级的一键重试。
+为了保证并发请求的稳定性，后端引入了全局信号量 (Semaphore) 限制最高并发数。针对每一章节的任务状态流转（`queued` -> `generating` -> `success` / `error`），系统在前端右下角提供了**抽屉式 (Drawer) 悬浮监控面板**，用户可以实时查看进度并支持单章级的一键重试和一键取消。
+
+同时，系统引入了 **SQLite 本地数据库** 作为持久化底座。用户的标书目录结构与生成进度会自动增量落盘，即使刷新页面或重启系统，也能一秒恢复至最后的工作状态。

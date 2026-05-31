@@ -14,15 +14,15 @@ class OutlineItemModel(BaseModel):
 class RewriteResponse(BaseModel):
     outline: list[OutlineItemModel]
 
-async def rewrite_outline_with_gemini(user_instruction: str, current_outline: List[dict], active_chapter_id: str = None) -> List[dict]:
+async def rewrite_outline_with_gemini(user_instruction: str, current_outline: List[dict], active_chapter_id: str = None, system_prompt: str = None, model_name: str = None) -> List[dict]:
     """
     Call Gemini 3.1 Pro to rewrite the document outline based on user instructions.
     """
-    api_key = os.getenv("GOOGLE_API_KEY")
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GOOGLE_API_KEY is not set in environment variables")
         
-    model_name = os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
+    actual_model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
     
     # Initialize the new google-genai client
     client = genai.Client(api_key=api_key)
@@ -34,9 +34,10 @@ async def rewrite_outline_with_gemini(user_instruction: str, current_outline: Li
     if active_chapter_id:
         context_msg = f"\nThe user is currently focusing on chapter/section with ID: '{active_chapter_id}'. "
         
+    sys_p = system_prompt if system_prompt else f"You are an expert Bid Architect (Commander).{context_msg}"
     prompt = f"""
-You are an expert Bid Architect (Commander).{context_msg}
-The user wants to modify the following Bid Document Outline based on their instructions.
+{sys_p}
+{context_msg}
 
 CURRENT OUTLINE:
 {outline_str}
@@ -64,7 +65,7 @@ For example:
     
     # Generate content with structured output
     response = client.models.generate_content(
-        model=model_name,
+        model=actual_model_name,
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
@@ -86,15 +87,15 @@ For example:
 
 import time
 
-async def stream_rewrite_outline_with_gemini(user_instruction: str, current_outline: List[dict], active_chapter_id: str = None):
+async def stream_rewrite_outline_with_gemini(user_instruction: str, current_outline: List[dict], active_chapter_id: str = None, system_prompt: str = None, model_name: str = None):
     """
     Call Gemini 3.1 Pro to rewrite the document outline, returning an async stream of chunks.
     """
-    api_key = os.getenv("GOOGLE_API_KEY")
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GOOGLE_API_KEY is not set in environment variables")
         
-    model_name = os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
+    actual_model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
     
     # Initialize the new google-genai client
     client = genai.Client(api_key=api_key)
@@ -106,9 +107,10 @@ async def stream_rewrite_outline_with_gemini(user_instruction: str, current_outl
     if active_chapter_id:
         context_msg = f"\nThe user is currently focusing on chapter/section with ID: '{active_chapter_id}'. "
         
+    sys_p = system_prompt if system_prompt else f"You are an expert Bid Architect (Commander).{context_msg}"
     prompt = f"""
-You are an expert Bid Architect (Commander).{context_msg}
-The user wants to modify the following Bid Document Outline based on their instructions.
+{sys_p}
+{context_msg}
 
 CURRENT OUTLINE:
 {outline_str}
@@ -140,7 +142,7 @@ Provide your step-by-step reasoning first. Then, you MUST output the final outli
     
     # Use the async client `client.aio` for streaming in FastAPI
     response_stream = client.aio.models.generate_content_stream(
-        model=model_name,
+        model=actual_model_name,
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.2,

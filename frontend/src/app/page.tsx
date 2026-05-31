@@ -1,5 +1,8 @@
 "use client";
 
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { 
   FileText, 
@@ -133,6 +136,7 @@ const TreeItem = ({
           ))}
         </div>
       )}
+
     </div>
   );
 };
@@ -159,6 +163,21 @@ export default function Dashboard() {
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set(["2"]));
   const [taskQueue, setTaskQueue] = useState<Record<string, GenTask>>({});
   const [isTaskPanelOpen, setIsTaskPanelOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [systemPrompt, setSystemPrompt] = useState(`You are an expert Bid Architect (Commander) specializing in enterprise-grade proposals.
+Your task is to rewrite, refine, or expand the Document Outline based on user instructions.
+
+CRITICAL REQUIREMENTS:
+1. Structure: Ensure a highly logical, MECE (Mutually Exclusive, Collectively Exhaustive) hierarchy.
+2. Granularity: Break down complex sections into detailed sub-sections (Level 3 or 4) to provide clear guidance for the content writers.
+3. Professionalism: Use formal, precise terminology suitable for government or enterprise bidding.
+4. Formatting: 
+   - Level 1: 第一章, 第二章...
+   - Level 2: 1.1, 1.2...
+   - Level 3: 1.1.1, 1.1.2...`);
+  const [proModel, setProModel] = useState<string>("gemini-3.1-pro-preview");
+  const [flashModel, setFlashModel] = useState<string>("gemini-2.5-flash");
+  const [availableModels, setAvailableModels] = useState<{name: string, display_name: string}[]>([]);
   const [projectId, setProjectId] = useState<string | null>(null);
   const MAX_CONCURRENT_TASKS = 3;
   const [isExporting, setIsExporting] = useState(false);
@@ -194,6 +213,29 @@ export default function Dashboard() {
       }
     };
     fetchLatestProject();
+    
+    // Load saved models
+    const savedPro = localStorage.getItem("proModel");
+    if (savedPro) setProModel(savedPro);
+    const savedFlash = localStorage.getItem("flashModel");
+    if (savedFlash) setFlashModel(savedFlash);
+
+    // Fetch available models
+    const fetchModels = async () => {
+      try {
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+        const response = await fetch(`${apiUrl}/models`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.status === "success" && data.models) {
+            setAvailableModels(data.models);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to fetch models", e);
+      }
+    };
+    fetchModels();
   }, []);
 
 
@@ -234,6 +276,10 @@ export default function Dashboard() {
       content: `⏳ 已将《${flatOutline.find(c => c.id === chapterId)?.title}》及其子章节共 ${leaves.length} 个任务加入生成队列。`
     }]);
     setIsTaskPanelOpen(true);
+  };
+
+  const handleSelectChapter = (chapterId: string) => {
+    setActiveChapterId(chapterId);
   };
 
   const cancelTask = (chapterId: string) => {
@@ -277,7 +323,8 @@ export default function Dashboard() {
           signal: controller.signal,
           body: JSON.stringify({
             sections: [{ id: chapter.id, title: chapter.title, level: chapter.level, index: parseInt(chapter.id.split('.').pop() || '0') || 0, context: "" }],
-            global_guidelines: ""
+            global_guidelines: "",
+            flash_model: flashModel
           }),
         });
 
@@ -407,6 +454,7 @@ export default function Dashboard() {
         body: JSON.stringify({
           instruction: userInstruction,
           active_chapter_id: activeChapterId,
+          pro_model: proModel,
           current_outline: flatOutline.map(item => ({
             id: item.id,
             title: item.title,
@@ -556,7 +604,7 @@ export default function Dashboard() {
             </div>
             <span className="font-bold text-lg tracking-tight text-slate-800">BidMaster</span>
           </div>
-          <Button variant="ghost" size="icon" className="text-slate-500 hover:text-slate-700">
+          <Button variant="ghost" size="icon" className="text-slate-500 hover:text-slate-700" onClick={() => setIsSettingsOpen(true)}>
             <Settings size={18} />
           </Button>
         </div>
@@ -581,7 +629,7 @@ export default function Dashboard() {
                 key={item.id} 
                 item={item} 
                 activeId={activeChapterId} 
-                onSelect={setActiveChapterId} 
+                onSelect={handleSelectChapter} 
                 expandedIds={expandedIds}
                 toggleExpand={toggleExpand}
                 taskQueue={taskQueue}
@@ -720,14 +768,18 @@ export default function Dashboard() {
                   <CardContent className="p-8 bg-white">
                     <div className="prose prose-slate max-w-none">
                       <h4 className="text-slate-900 font-extrabold text-xl mb-6">{currentChapterTitle}</h4>
-                      <div className="text-slate-600 leading-relaxed min-h-[200px] whitespace-pre-wrap">
+                      <div className="text-slate-600 leading-relaxed min-h-[200px]">
                         {(taskQueue[activeChapterId]?.status === 'generating' || taskQueue[activeChapterId]?.status === 'queued') ? (
                           <div className="flex flex-col items-center justify-center h-48 space-y-4 text-slate-400">
                             <Loader2 className="h-8 w-8 animate-spin text-primary/60" />
                             <p>AI 正在奋笔疾书，预计需要几十秒时间...</p>
                           </div>
                         ) : currentChapter?.content ? (
-                          <p>{currentChapter.content}</p>
+                          <div className="prose prose-sm md:prose-base prose-slate max-w-none w-full">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {currentChapter.content}
+                            </ReactMarkdown>
+                          </div>
                         ) : activeChapterId === "2.1" ? (
                           <p>
                             本项目的整体架构遵循“高可用、可扩展、安全性”的设计原则。底座采用私有云部署，支撑上层业务应用。前端采用微前端架构，后端基于 Spring Cloud 微服务体系，实现业务解耦与敏捷交付...
@@ -878,6 +930,72 @@ export default function Dashboard() {
           </p>
         </div>
       </aside>
+
+      {/* Settings Modal */}
+      {isSettingsOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200 border border-slate-200">
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+              <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2"><Settings size={18} className="text-primary"/> 提示词与系统配置 (Settings)</h2>
+              <Button variant="ghost" size="icon" className="h-8 w-8 text-slate-400 hover:text-slate-700" onClick={() => setIsSettingsOpen(false)}>
+                <X size={18} />
+              </Button>
+            </div>
+            <div className="p-6 flex-1">
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1">目录大纲重构系统提示词 (Outline Commander Prompt)</label>
+                  <p className="text-xs text-slate-500 mb-3">此提示词将被注入到 Gemini API 中，专门用于控制“一键重构目录”时的架构、专业度和拆解颗粒度。</p>
+                  <textarea 
+                    className="w-full h-72 p-4 rounded-lg border border-slate-200 focus:border-primary focus:ring-1 focus:ring-primary outline-none resize-none font-mono text-sm bg-slate-50/50 text-slate-700 leading-relaxed shadow-inner"
+                    value={systemPrompt}
+                    onChange={(e) => setSystemPrompt(e.target.value)}
+                  />
+                </div>
+                
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1">解析与大纲模型 (Pro Model)</label>
+                    <select 
+                      className="w-full h-10 px-3 rounded-lg border border-slate-200 focus:border-primary outline-none bg-white text-sm"
+                      value={proModel}
+                      onChange={(e) => setProModel(e.target.value)}
+                    >
+                      {availableModels.map(m => (
+                        <option key={m.name} value={m.name}>{m.display_name} ({m.name})</option>
+                      ))}
+                      {availableModels.length === 0 && <option value={proModel}>{proModel}</option>}
+                    </select>
+                    <p className="text-xs text-slate-500 mt-1">用于深度理解招标文件并进行整体框架构建。</p>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1">内容预处理模型 (Flash Model)</label>
+                    <select 
+                      className="w-full h-10 px-3 rounded-lg border border-slate-200 focus:border-primary outline-none bg-white text-sm"
+                      value={flashModel}
+                      onChange={(e) => setFlashModel(e.target.value)}
+                    >
+                      {availableModels.map(m => (
+                        <option key={m.name} value={m.name}>{m.display_name} ({m.name})</option>
+                      ))}
+                      {availableModels.length === 0 && <option value={flashModel}>{flashModel}</option>}
+                    </select>
+                    <p className="text-xs text-slate-500 mt-1">用于调用 Dify 工作流之前，快速生成精准的指示。</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t bg-slate-50 flex justify-end gap-3">
+              <Button variant="outline" onClick={() => setIsSettingsOpen(false)}>取消</Button>
+              <Button onClick={() => {
+                localStorage.setItem("proModel", proModel);
+                localStorage.setItem("flashModel", flashModel);
+                setIsSettingsOpen(false);
+              }}>保存配置</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

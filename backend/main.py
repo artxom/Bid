@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from dotenv import load_dotenv
 import json
+from google import genai
 
 from services.commander import rewrite_outline_with_gemini, stream_rewrite_outline_with_gemini
 from services.docx_builder import rebuild_docx_from_outline
@@ -103,6 +104,38 @@ def get_outline_level(paragraph):
 async def root():
     return {"message": "Bid Assistant API is running"}
 
+@app.get("/models")
+async def get_models():
+    try:
+        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("No API key found in environment variables.")
+        client = genai.Client(api_key=api_key)
+        models_list = client.models.list()
+        result = []
+        for m in models_list:
+            # Check if it's a generative model
+            if hasattr(m, 'supported_generation_methods') and "generateContent" in getattr(m, 'supported_generation_methods', []):
+                result.append({"name": m.name, "display_name": m.display_name})
+        # If supported_generation_methods is not easily accessible in the new SDK version, fallback to just returning all or checking prefix
+        if not result:
+            for m in models_list:
+                if "gemini" in m.name.lower():
+                    result.append({"name": m.name, "display_name": m.display_name})
+                    
+        return {"status": "success", "models": result}
+    except Exception as e:
+        print(f"Failed to fetch models dynamically: {e}")
+        # Fallback to standard models if API throws 501 or key missing
+        fallback_models = [
+            {"name": "gemini-3.1-pro-preview", "display_name": "Gemini 3.1 Pro (Preview)"},
+            {"name": "gemini-3.5-flash", "display_name": "Gemini 3.5 Flash"},
+            {"name": "gemini-2.5-flash", "display_name": "Gemini 2.5 Flash"},
+            {"name": "gemini-1.5-pro", "display_name": "Gemini 1.5 Pro"},
+            {"name": "gemini-1.5-flash", "display_name": "Gemini 1.5 Flash"},
+        ]
+        return {"status": "success", "models": fallback_models}
+
 class SectionItem(BaseModel):
     id: str
     title: str
@@ -113,16 +146,19 @@ class SectionItem(BaseModel):
 class GenerateRequest(BaseModel):
     sections: List[SectionItem]
     global_guidelines: Optional[str] = ""
+    flash_model: Optional[str] = "gemini-3.5-flash"
 
 class RewriteRequest(BaseModel):
     instruction: str
     current_outline: List[dict]
     active_chapter_id: Optional[str] = None
+    system_prompt: Optional[str] = None
+    pro_model: Optional[str] = "gemini-3.1-pro"
 
 MAX_CONCURRENCY = 5
 global_dify_semaphore = None
 
-async def call_dify_workflow(section: SectionItem, global_guidelines: str) -> dict:
+async def call_dify_workflow(section: SectionItem, global_guidelines: str, flash_model: str) -> dict:
     global global_dify_semaphore
     if global_dify_semaphore is None:
         global_dify_semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
@@ -135,11 +171,32 @@ async def call_dify_workflow(section: SectionItem, global_guidelines: str) -> di
             "Authorization": f"Bearer {dify_key}",
             "Content-Type": "application/json"
         }
+        
+        # --- Pre-process context using Gemini Flash Model ---
+        detailed_context = section.context
+        try:
+            gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            if gemini_key:
+                client = genai.Client(api_key=gemini_key)
+                prompt = f"请根据大纲标题和全局规范，为该章节生成具体的指导上下文，以便下游系统(如DeepSeek)有方向、机械地生成最终内容。\n\n章节标题: {section.title}\n已有上下文: {section.context}\n全局规范: {global_guidelines}\n\n请输出详尽、明确的指示和内容框架要点："
+                
+                # using aio for async generation
+                response = await client.aio.models.generate_content(
+                    model=flash_model or "gemini-2.5-flash",
+                    contents=prompt
+                )
+                if response.text:
+                    detailed_context = response.text
+        except Exception as e:
+            print(f"Error generating pre-context with Gemini: {e}")
+            # Fallback to the original context
+        # ----------------------------------------------------
+
         payload = {
             "inputs": {
                 "section_id": section.id,
                 "section_title": section.title,
-                "context": section.context,
+                "context": detailed_context,
                 "global_guidelines": global_guidelines
             },
             "response_mode": "blocking",
@@ -156,6 +213,10 @@ async def call_dify_workflow(section: SectionItem, global_guidelines: str) -> di
                 # 解析 Dify 阻塞模式返回的数据结构
                 if "data" in data and "outputs" in data["data"] and "result" in data["data"]["outputs"]:
                     result_str = data["data"]["outputs"]["result"]
+                    
+                    # 剔除 <think>...</think> 标签及其内容
+                    result_str = re.sub(r'<think>.*?</think>', '', result_str, flags=re.DOTALL).strip()
+                    
                     return {"section_id": section.id, "status": "success", "data": result_str}
                 else:
                     return {"section_id": section.id, "status": "error", "error": f"Invalid Dify response: {data}"}
@@ -168,7 +229,7 @@ async def call_dify_workflow(section: SectionItem, global_guidelines: str) -> di
 async def generate_sections(request: GenerateRequest):
     tasks = []
     for section in request.sections:
-        tasks.append(call_dify_workflow(section, request.global_guidelines))
+        tasks.append(call_dify_workflow(section, request.global_guidelines, request.flash_model))
         
     results = await asyncio.gather(*tasks)
     
@@ -200,7 +261,9 @@ async def rewrite_outline(request: RewriteRequest):
         new_outline = await rewrite_outline_with_gemini(
             user_instruction=request.instruction,
             current_outline=request.current_outline,
-            active_chapter_id=request.active_chapter_id
+            active_chapter_id=request.active_chapter_id,
+            system_prompt=request.system_prompt,
+            model_name=request.pro_model
         )
         # 也可以在这里调用 docx_builder 生成新的框架文档
         # buffer = rebuild_docx_from_outline(new_outline)
@@ -230,7 +293,9 @@ async def rewrite_stream(request: RewriteRequest):
             async for chunk in stream_rewrite_outline_with_gemini(
                 user_instruction=request.instruction,
                 current_outline=request.current_outline,
-                active_chapter_id=request.active_chapter_id
+                active_chapter_id=request.active_chapter_id,
+                system_prompt=request.system_prompt,
+                model_name=request.pro_model
             ):
                 yield f"data: {json.dumps({'chunk': chunk}, ensure_ascii=False)}\n\n"
         except Exception as e:
