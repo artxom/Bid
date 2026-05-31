@@ -7,6 +7,8 @@ services:
       - "8001:8000"  # 外部访问 8001，内部容器仍是 8000
     volumes:
       - ./backend:/app
+    env_file:
+      - .env
     environment:
       - ENV=production
     restart: always
@@ -16,11 +18,11 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        - NEXT_PUBLIC_API_URL=http://localhost:8001
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8001}
     ports:
       - "3001:3000"  # 外部访问 3001，内部容器仍是 3000
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8001
+    env_file:
+      - .env
     depends_on:
       - backend
     restart: always
