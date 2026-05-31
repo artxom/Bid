@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+backend/venv/
+backend/.venv/
+.env
+backend/.env
+frontend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+
+# Next.js
+frontend/.next/
+frontend/out/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+backend/__pycache__/
+.pytest_cache/
+backend/.pytest_cache/
+
+# IDEs and OS
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/.pnpm-debug.log*
+
+# Misc
+frontend/.vercel
+frontend/*.tsbuildinfo
