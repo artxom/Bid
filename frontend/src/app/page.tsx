@@ -122,7 +122,7 @@ const TreeItem = ({
 };
 
 // Mock Data
-const MOCK_FLAT_OUTLINE = [
+const MOCK_FLAT_OUTLINE: OutlineItem[] = [
   { id: "1", title: "第一章 公司实力与资质", status: "completed", level: 1 },
   { id: "2", title: "第二章 数字化转型技术方案", level: 1 },
   { id: "2.1", title: "2.1 整体架构设计", status: "in-progress", level: 2 },
