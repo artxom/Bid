@@ -19,6 +19,6 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            cd /path/to/your/project/Bid
+            cd /home/root/Bid
             git pull origin main
             docker-compose up -d --build
