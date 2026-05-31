@@ -23,6 +23,8 @@ services:
       - "3001:3000"  # 外部访问 3001，内部容器仍是 3000
     env_file:
       - .env
+    environment:
+      - PORT=3000
     depends_on:
       - backend
     restart: always
