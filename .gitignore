@@ -37,3 +37,4 @@ frontend/.pnpm-debug.log*
 # Misc
 frontend/.vercel
 frontend/*.tsbuildinfo
+backend/uploads/

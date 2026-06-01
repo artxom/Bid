@@ -1,4 +1,5 @@
 import io
+import os
 import re
 import base64
 import zlib
@@ -6,6 +7,8 @@ import requests
 import json
 from docx import Document
 from docx.shared import Inches
+from docx.oxml.shared import OxmlElement
+from docx.oxml.ns import qn
 from typing import List, Dict, Any
 
 def compress_mermaid(mermaid_code: str) -> str:
@@ -86,7 +89,9 @@ def parse_content_to_segments(content_str: str) -> List[Dict[str, Any]]:
                 segments.append({"type": "chart", "format": "mermaid", "value": '\n'.join(mermaid_code)})
                 mermaid_code.clear()
             else:
-                mermaid_code.append(line)
+                # Force vertical flowchart
+                modified_line = re.sub(r'^(graph|flowchart)\s+(LR|RL)', r'\1 TD', line, flags=re.IGNORECASE)
+                mermaid_code.append(modified_line)
             continue
             
         # Handle table blocks (simple heuristic: starts with | and contains |)
@@ -111,8 +116,34 @@ def parse_content_to_segments(content_str: str) -> List[Dict[str, Any]]:
         
     return segments
 
-def rebuild_docx_from_outline(outline: List[Dict]) -> io.BytesIO:
-    doc = Document()
+def clear_document(doc: Document):
+    for paragraph in doc.paragraphs:
+        p = paragraph._element
+        p.getparent().remove(p)
+        paragraph._p = paragraph._element = None
+    for table in doc.tables:
+        tbl = table._element
+        tbl.getparent().remove(tbl)
+        table._tbl = table._element = None
+
+def set_table_width_100(table):
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    tblW = OxmlElement('w:tblW')
+    tblW.set(qn('w:w'), '5000') # 5000 pct = 100% width
+    tblW.set(qn('w:type'), 'pct')
+    tblPr.append(tblW)
+
+def rebuild_docx_from_outline(outline: List[Dict], template_path: str = None) -> io.BytesIO:
+    if template_path and os.path.exists(template_path):
+        try:
+            doc = Document(template_path)
+            clear_document(doc)
+        except Exception as e:
+            print(f"Failed to load template {template_path}: {e}")
+            doc = Document()
+    else:
+        doc = Document()
     
     for item in outline:
         title = item.get("title", "")
@@ -149,6 +180,7 @@ def rebuild_docx_from_outline(outline: List[Dict]) -> io.BytesIO:
                         try:
                             table = doc.add_table(rows=len(rows), cols=len(rows[0]))
                             table.style = 'Table Grid'
+                            set_table_width_100(table)
                             for row_idx, row_data in enumerate(rows):
                                 for col_idx, cell_text in enumerate(row_data):
                                     if col_idx < len(table.columns):

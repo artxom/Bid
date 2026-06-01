@@ -291,12 +291,19 @@ async def generate_sections(request: GenerateRequest):
     }
 
 class ExportRequest(BaseModel):
+    project_id: Optional[str] = None
     outline: List[dict]
 
 @app.post("/export-outline")
-async def export_outline(request: ExportRequest):
+async def export_outline(request: ExportRequest, db: Session = Depends(get_db)):
     try:
-        buffer = rebuild_docx_from_outline(request.outline)
+        template_path = None
+        if request.project_id:
+            project = db.query(models.Project).filter(models.Project.id == request.project_id).first()
+            if project and project.template_path:
+                template_path = project.template_path
+                
+        buffer = rebuild_docx_from_outline(request.outline, template_path=template_path)
         return StreamingResponse(
             buffer,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -383,6 +390,17 @@ async def upload_document(file: UploadFile = File(...), db: Session = Depends(ge
         outline=flat_outline
     )
     db.add(db_project)
+    db.commit()
+    db.refresh(db_project)
+    
+    # Save the physical file as template
+    uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
+    os.makedirs(uploads_dir, exist_ok=True)
+    template_path = os.path.join(uploads_dir, f"{db_project.id}.docx")
+    with open(template_path, "wb") as f:
+        f.write(content)
+        
+    db_project.template_path = template_path
     db.commit()
     db.refresh(db_project)
     

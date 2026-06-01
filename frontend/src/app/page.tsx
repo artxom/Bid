@@ -192,7 +192,7 @@ CRITICAL REQUIREMENTS:
   useEffect(() => {
     const fetchLatestProject = async () => {
       try {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
         const response = await fetch(`${apiUrl}/project/latest`);
         if (response.ok) {
           const data = await response.json();
@@ -223,7 +223,7 @@ CRITICAL REQUIREMENTS:
     // Fetch available models
     const fetchModels = async () => {
       try {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
         const response = await fetch(`${apiUrl}/models`);
         if (response.ok) {
           const data = await response.json();
@@ -316,7 +316,7 @@ CRITICAL REQUIREMENTS:
       }
       
       try {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
         const response = await fetch(`${apiUrl}/generate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -393,7 +393,7 @@ CRITICAL REQUIREMENTS:
     formData.append("file", file);
 
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
       const response = await fetch(`${apiUrl}/upload`, {
         method: "POST",
         body: formData,
@@ -447,7 +447,7 @@ CRITICAL REQUIREMENTS:
     // Don't add a hardcoded text message. The stream will fill the next message.
 
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
       const response = await fetch(`${apiUrl}/commander/rewrite-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -575,11 +575,11 @@ CRITICAL REQUIREMENTS:
     setMessages(prev => [...prev, { role: "assistant", content: "⏳ 正在基于当前目录结构生成空白 Word 文档..." }]);
     
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
       const response = await fetch(`${apiUrl}/export-outline`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ outline: flatOutline })
+        body: JSON.stringify({ project_id: projectId, outline: flatOutline })
       });
       
       if (!response.ok) throw new Error("导出失败");

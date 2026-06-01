@@ -8,6 +8,7 @@ class Project(Base):
     
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
     filename = Column(String, index=True)
+    template_path = Column(String, nullable=True) # Stores the path to the uploaded document
     outline = Column(JSON) # Stores the list of OutlineItem dicts
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
