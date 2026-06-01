@@ -269,6 +269,15 @@ async def call_dify_workflow(section: SectionItem, global_guidelines: str, flash
                     # 剔除 <think>...</think> 标签及其内容
                     result_str = re.sub(r'<think>.*?</think>', '', result_str, flags=re.DOTALL).strip()
                     
+                    # 剔除整个外层可能包裹的 markdown 代码块标签
+                    if result_str.startswith("```markdown") and result_str.endswith("```"):
+                        result_str = result_str[11:-3].strip()
+                    elif result_str.startswith("```") and result_str.endswith("```"):
+                        # 处理 ``` 后面可能跟着的语言如 html, json (尽管按照约定只该输出markdown)
+                        lines = result_str.split("\n")
+                        if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].strip() == "```":
+                            result_str = "\n".join(lines[1:-1]).strip()
+                    
                     return {"section_id": section.id, "status": "success", "data": result_str}
                 else:
                     return {"section_id": section.id, "status": "error", "error": f"Invalid Dify response: {data}"}

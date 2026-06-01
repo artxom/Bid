@@ -5,6 +5,7 @@ import base64
 import zlib
 import requests
 import json
+import mistune
 from docx import Document
 from docx.shared import Inches
 from docx.oxml.shared import OxmlElement
@@ -28,94 +29,6 @@ def render_mermaid_to_image(mermaid_code: str) -> io.BytesIO:
         print(f"Failed to render mermaid: {e}")
         return None
 
-def parse_markdown_table(table_text: str) -> List[List[str]]:
-    """Parse markdown table text into 2D array of strings"""
-    lines = table_text.strip().split('\n')
-    rows = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        # Check if it's a separator row like |---|---|
-        if re.match(r'^\|?[\s\-:]+\|', line):
-            continue
-        # Split by pipe
-        parts = line.strip('|').split('|')
-        rows.append([p.strip() for p in parts])
-    return rows
-
-def parse_content_to_segments(content_str: str) -> List[Dict[str, Any]]:
-    """Parse Markdown (or JSON) to segments: text, chart, table"""
-    if not content_str:
-        return []
-        
-    try:
-        # Try JSON format first if applicable
-        data = json.loads(content_str)
-        if isinstance(data, dict) and "segments" in data:
-            return data["segments"]
-    except Exception:
-        pass
-        
-    segments = []
-    
-    lines = content_str.split('\n')
-    current_text = []
-    
-    in_mermaid = False
-    mermaid_code = []
-    
-    in_table = False
-    table_text = []
-    
-    def flush_text():
-        if current_text:
-            text_val = '\n'.join(current_text).strip()
-            if text_val:
-                segments.append({"type": "text", "value": text_val})
-            current_text.clear()
-            
-    for line in lines:
-        stripped = line.strip()
-        
-        # Handle mermaid blocks
-        if not in_mermaid and stripped.startswith('```mermaid'):
-            flush_text()
-            in_mermaid = True
-            continue
-        elif in_mermaid:
-            if stripped.startswith('```'):
-                in_mermaid = False
-                segments.append({"type": "chart", "format": "mermaid", "value": '\n'.join(mermaid_code)})
-                mermaid_code.clear()
-            else:
-                # Force vertical flowchart
-                modified_line = re.sub(r'^(graph|flowchart)\s+(LR|RL)', r'\1 TD', line, flags=re.IGNORECASE)
-                mermaid_code.append(modified_line)
-            continue
-            
-        # Handle table blocks (simple heuristic: starts with | and contains |)
-        if stripped.startswith('|') and stripped.endswith('|'):
-            if not in_table:
-                flush_text()
-                in_table = True
-            table_text.append(line)
-            continue
-        elif in_table:
-            # End of table
-            in_table = False
-            segments.append({"type": "table", "format": "markdown", "value": '\n'.join(table_text)})
-            table_text.clear()
-            
-        # If normal text
-        current_text.append(line)
-        
-    flush_text()
-    if in_table:
-        segments.append({"type": "table", "format": "markdown", "value": '\n'.join(table_text)})
-        
-    return segments
-
 def clear_document(doc: Document):
     for paragraph in doc.paragraphs:
         p = paragraph._element
@@ -134,6 +47,103 @@ def set_table_width_100(table):
     tblW.set(qn('w:type'), 'pct')
     tblPr.append(tblW)
 
+def render_inline(runs_container, children, bold=False, italic=False):
+    if not children:
+        return
+    for child in children:
+        ctype = child.get("type")
+        if ctype == "text":
+            run = runs_container.add_run(child.get("raw", ""))
+            if bold: run.bold = True
+            if italic: run.italic = True
+        elif ctype == "strong":
+            render_inline(runs_container, child.get("children", []), bold=True, italic=italic)
+        elif ctype == "emphasis":
+            render_inline(runs_container, child.get("children", []), bold=bold, italic=True)
+        elif ctype == "codespan":
+            run = runs_container.add_run(child.get("raw", ""))
+            if bold: run.bold = True
+            if italic: run.italic = True
+        else:
+            if "raw" in child:
+                run = runs_container.add_run(child.get("raw", ""))
+            elif "children" in child:
+                render_inline(runs_container, child.get("children", []), bold=bold, italic=italic)
+
+def render_ast_to_docx(doc, ast_nodes):
+    for node in ast_nodes:
+        ctype = node.get("type")
+        
+        if ctype == "paragraph":
+            p = doc.add_paragraph()
+            render_inline(p, node.get("children", []))
+            
+        elif ctype == "heading":
+            level = node.get("attrs", {}).get("level", 1)
+            if level < 1: level = 1
+            if level > 9: level = 9
+            style_name = f"Heading {level}"
+            try:
+                p = doc.add_paragraph(style=style_name)
+            except KeyError:
+                p = doc.add_paragraph()
+            render_inline(p, node.get("children", []))
+            
+        elif ctype == "list":
+            children = node.get("children", [])
+            is_ordered = node.get("attrs", {}).get("ordered", False)
+            for li in children:
+                if li.get("type") == "list_item":
+                    style = 'List Number' if is_ordered else 'List Bullet'
+                    try:
+                        p = doc.add_paragraph(style=style)
+                    except KeyError:
+                        p = doc.add_paragraph()
+                    li_children = li.get("children", [])
+                    for lc in li_children:
+                        if lc.get("type") == "block_text":
+                            render_inline(p, lc.get("children", []))
+                        
+        elif ctype == "table":
+            table_children = node.get("children", [])
+            all_rows = []
+            for child in table_children:
+                if child.get("type") in ("table_head", "table_body"):
+                    for tr in child.get("children", []):
+                        if tr.get("type") == "table_row":
+                            cells = []
+                            for tc in tr.get("children", []):
+                                if tc.get("type") == "table_cell":
+                                    cells.append(tc.get("children", []))
+                            all_rows.append(cells)
+            
+            if all_rows and all_rows[0]:
+                try:
+                    table = doc.add_table(rows=len(all_rows), cols=len(all_rows[0]))
+                    table.style = 'Table Grid'
+                    set_table_width_100(table)
+                    for r_idx, row_data in enumerate(all_rows):
+                        for c_idx, cell_ast in enumerate(row_data):
+                            if c_idx < len(table.columns):
+                                cell = table.cell(r_idx, c_idx)
+                                cell.text = "" # Clear default paragraph text
+                                p = cell.paragraphs[0]
+                                render_inline(p, cell_ast)
+                except Exception as e:
+                    print(f"Table generation error: {e}")
+                    
+        elif ctype == "block_code":
+            info = node.get("attrs", {}).get("info", "")
+            val = node.get("raw", "")
+            if info == "mermaid":
+                img_stream = render_mermaid_to_image(val)
+                if img_stream:
+                    doc.add_picture(img_stream, width=Inches(5.0))
+                else:
+                    doc.add_paragraph(f"[图表渲染失败]\n```mermaid\n{val}\n```")
+            else:
+                doc.add_paragraph(val)
+
 def rebuild_docx_from_outline(outline: List[Dict], template_path: str = None) -> io.BytesIO:
     if template_path and os.path.exists(template_path):
         try:
@@ -144,6 +154,8 @@ def rebuild_docx_from_outline(outline: List[Dict], template_path: str = None) ->
             doc = Document()
     else:
         doc = Document()
+    
+    md_parser = mistune.create_markdown(renderer='ast', plugins=['table'])
     
     for item in outline:
         title = item.get("title", "")
@@ -161,33 +173,9 @@ def rebuild_docx_from_outline(outline: List[Dict], template_path: str = None) ->
             doc.add_paragraph(title)
             
         if content:
-            segments = parse_content_to_segments(content)
-            for seg in segments:
-                t = seg.get("type")
-                val = seg.get("value", "")
-                
-                if t == "text":
-                    doc.add_paragraph(val)
-                elif t == "chart" and seg.get("format") == "mermaid":
-                    img_stream = render_mermaid_to_image(val)
-                    if img_stream:
-                        doc.add_picture(img_stream, width=Inches(5.0))
-                    else:
-                        doc.add_paragraph(f"[图表渲染失败]\n```mermaid\n{val}\n```")
-                elif t == "table" and seg.get("format") == "markdown":
-                    rows = parse_markdown_table(val)
-                    if rows:
-                        try:
-                            table = doc.add_table(rows=len(rows), cols=len(rows[0]))
-                            table.style = 'Table Grid'
-                            set_table_width_100(table)
-                            for row_idx, row_data in enumerate(rows):
-                                for col_idx, cell_text in enumerate(row_data):
-                                    if col_idx < len(table.columns):
-                                        table.cell(row_idx, col_idx).text = cell_text
-                        except Exception as e:
-                            print(f"Table generation error: {e}")
-                            doc.add_paragraph(val)
+
+            ast_nodes = md_parser(content)
+            render_ast_to_docx(doc, ast_nodes)
     
     buffer = io.BytesIO()
     doc.save(buffer)
