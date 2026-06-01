@@ -180,7 +180,7 @@ CRITICAL REQUIREMENTS:
   const [flashModel, setFlashModel] = useState<string>("gemini-2.5-flash");
   const [availableModels, setAvailableModels] = useState<{name: string, display_name: string}[]>([]);
   const [projectId, setProjectId] = useState<string | null>(null);
-  const MAX_CONCURRENT_TASKS = 3;
+  const MAX_CONCURRENT_TASKS = 30;
   const [isExporting, setIsExporting] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -532,43 +532,56 @@ CRITICAL REQUIREMENTS:
       }
 
       // Extract JSON and Time
-      const jsonMatch = fullContent.match(/```json\n([\s\S]*?)\n```/);
+      const jsonMatch = fullContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
       const timeMatch = fullContent.match(/\[TOTAL_TIME:(.*?)s\]/);
       const timeStr = timeMatch ? timeMatch[1] : "?";
 
-      if (jsonMatch && jsonMatch[1]) {
-        const parsedOutline = JSON.parse(jsonMatch[1]);
-        if (parsedOutline.outline) {
-          setFlatOutline(prev => {
-            const activeIdx = prev.findIndex(item => item.id === activeChapterId);
-            if (activeIdx !== -1) {
-              const activeLevel = prev[activeIdx].level;
-              let activeEndIdx = prev.length;
-              for (let i = activeIdx + 1; i < prev.length; i++) {
-                if (prev[i].level <= activeLevel) {
-                  activeEndIdx = i;
-                  break;
-                }
-              }
-              const newOutline = [
-                ...prev.slice(0, activeIdx),
-                ...parsedOutline.outline,
-                ...prev.slice(activeEndIdx)
-              ];
-              setExpandedIds(new Set(newOutline.filter((n: any) => n.level === 1).map((n: any) => n.id)));
-              return newOutline;
-            } else {
-              setExpandedIds(new Set(parsedOutline.outline.filter((n: any) => n.level === 1).map((n: any) => n.id)));
-              return parsedOutline.outline;
-            }
-          });
-          
-          setMessages(prev => {
-            const newMsgs = [...prev];
-            newMsgs[newMsgs.length - 1].content = `✅ 大纲重构完成！左侧 Word 结构树已自动更新。思考与生成共耗时：${timeStr} 秒。`;
-            return newMsgs;
-          });
+      let jsonStr = jsonMatch ? jsonMatch[1] : fullContent;
+      if (!jsonMatch) {
+        const start = fullContent.indexOf('{');
+        const end = fullContent.lastIndexOf('}');
+        if (start !== -1 && end !== -1 && end >= start) {
+          jsonStr = fullContent.substring(start, end + 1);
         }
+      }
+
+      let parsedOutline = null;
+      try {
+        parsedOutline = JSON.parse(jsonStr);
+      } catch (e) {
+        console.error("Failed to parse JSON:", jsonStr);
+      }
+
+      if (parsedOutline && parsedOutline.outline) {
+        setFlatOutline(prev => {
+          const activeIdx = prev.findIndex(item => item.id === activeChapterId);
+          if (activeIdx !== -1) {
+            const activeLevel = prev[activeIdx].level;
+            let activeEndIdx = prev.length;
+            for (let i = activeIdx + 1; i < prev.length; i++) {
+              if (prev[i].level <= activeLevel) {
+                activeEndIdx = i;
+                break;
+              }
+            }
+            const newOutline = [
+              ...prev.slice(0, activeIdx),
+              ...parsedOutline.outline,
+              ...prev.slice(activeEndIdx)
+            ];
+            setExpandedIds(new Set(newOutline.filter((n: any) => n.level === 1).map((n: any) => n.id)));
+            return newOutline;
+          } else {
+            setExpandedIds(new Set(parsedOutline.outline.filter((n: any) => n.level === 1).map((n: any) => n.id)));
+            return parsedOutline.outline;
+          }
+        });
+        
+        setMessages(prev => {
+          const newMsgs = [...prev];
+          newMsgs[newMsgs.length - 1].content = `✅ 大纲重构完成！左侧 Word 结构树已自动更新。思考与生成共耗时：${timeStr} 秒。`;
+          return newMsgs;
+        });
       } else {
         throw new Error("模型未返回有效的 JSON 大纲数据");
       }

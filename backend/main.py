@@ -157,7 +157,7 @@ class RewriteRequest(BaseModel):
     system_prompt: Optional[str] = None
     pro_model: Optional[str] = "gemini-3.1-pro"
 
-MAX_CONCURRENCY = 5
+MAX_CONCURRENCY = 30
 global_dify_semaphore = None
 
 async def call_dify_workflow(section: SectionItem, global_guidelines: str, flash_model: str) -> dict:

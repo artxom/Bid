@@ -84,15 +84,9 @@ def render_ast_to_docx(doc, ast_nodes):
             render_inline(p, node.get("children", []))
             
         elif ctype == "heading":
-            level = node.get("attrs", {}).get("level", 1)
-            if level < 1: level = 1
-            if level > 9: level = 9
-            style_name = f"Heading {level}"
-            try:
-                p = doc.add_paragraph(style=style_name)
-            except KeyError:
-                p = doc.add_paragraph()
-            render_inline(p, node.get("children", []))
+            # 降级渲染正文中的 Markdown 标题，防止污染 Word 官方 TOC 目录
+            p = doc.add_paragraph()
+            render_inline(p, node.get("children", []), bold=True)
             
         elif ctype == "list":
             children = node.get("children", [])
@@ -134,7 +128,10 @@ def render_ast_to_docx(doc, ast_nodes):
             if all_rows and all_rows[0]:
                 try:
                     table = doc.add_table(rows=len(all_rows), cols=len(all_rows[0]))
-                    table.style = 'Table Grid'
+                    try:
+                        table.style = 'Table Grid'
+                    except KeyError:
+                        pass
                     set_table_width_100(table)
                     for r_idx, row_data in enumerate(all_rows):
                         for c_idx, cell_ast in enumerate(row_data):
@@ -154,7 +151,7 @@ def render_ast_to_docx(doc, ast_nodes):
                 if img_stream:
                     doc.add_picture(img_stream, width=Inches(5.0))
                 else:
-                    doc.add_paragraph(f"[图表渲染失败]\n```mermaid\n{val}\n```")
+                    doc.add_paragraph(f"[图表渲染失败: 大模型生成的 Mermaid 语法错误或网络异常]\n```mermaid\n{val}\n```")
             else:
                 doc.add_paragraph(val)
 
