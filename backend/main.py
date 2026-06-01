@@ -190,6 +190,8 @@ async def call_dify_workflow(section: SectionItem, global_guidelines: str, flash
 1. 强制扩充维度：将该章节拆分为至少3-5个具体的子话题或小节。
 2. 明确字数要求：在指导中明确要求下游模型在每个子话题上输出大量细节（例如“每个子点展开说明不少于300-500字”）。
 3. 丰富内容形式：明确指示哪些子话题适合用 Markdown 表格进行对比分析，哪些适合用 Mermaid 流程图展示业务逻辑。
+4. 【审慎原则（极为重要）】：作为上游指令生成者，不可僭越。当前如果没有充足的真实项目背景，宁可生成模棱两可或预留空白的指导，也**绝对不可**随意脑补编造不符项目真实情况的事实（如虚构项目综述、融资金额、特定客户名称等），必须严谨务实。
+5. 【排版与标号限制】：明确要求下游模型在生成正文时，**禁止**带入“第一节”、“1.3”等章节自编号（因为当前处理的已经是最低级别叶子节点）。同时，明确指示下游模型**严格限制 Markdown 粗体（**）的使用频率**，回归正式严肃的公文排版风格，避免过度加粗渲染。
 
 请输出详尽、明确的指示和内容框架要点："""
                 
@@ -232,12 +234,17 @@ async def call_dify_workflow(section: SectionItem, global_guidelines: str, flash
             # Fallback to the original context
         # ----------------------------------------------------
 
+        # 拦截并强化传入 Dify 的全局规范
+        enhanced_global_guidelines = global_guidelines + """\n\n【全局执行严格规范】：
+1. 禁止自编号：你负责生成的内容属于大纲的最低叶子节点，正文中**绝对禁止**自行加入“第一章”、“第二节”、“1.3”、“1.4”等任何章节标号或大纲层级结构。
+2. 严肃公文排版：**严格限制** Markdown 粗体（**）的使用频率。只有在极少数绝对核心的术语或指标上才允许加粗，严禁大段落或过度频繁的加粗行为，必须回归正式严肃的公文排版风格。"""
+
         payload = {
             "inputs": {
                 "section_id": section.id,
                 "section_title": section.title,
                 "context": detailed_context,
-                "global_guidelines": global_guidelines
+                "global_guidelines": enhanced_global_guidelines
             },
             "response_mode": "blocking",
             "user": "fastapi-backend"

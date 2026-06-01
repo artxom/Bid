@@ -32,6 +32,7 @@ interface OutlineItem {
   status?: "completed" | "in-progress" | "todo";
   children?: OutlineItem[];
   content?: string;
+  context?: string;
 }
 
 export interface GenTask {
@@ -322,7 +323,7 @@ CRITICAL REQUIREMENTS:
           headers: { "Content-Type": "application/json" },
           signal: controller.signal,
           body: JSON.stringify({
-            sections: [{ id: chapter.id, title: chapter.title, level: chapter.level, index: parseInt(chapter.id.split('.').pop() || '0') || 0, context: "" }],
+            sections: [{ id: chapter.id, title: chapter.title, level: chapter.level, index: parseInt(chapter.id.split('.').pop() || '0') || 0, context: chapter.context || "" }],
             global_guidelines: "",
             flash_model: flashModel
           }),
@@ -459,7 +460,8 @@ CRITICAL REQUIREMENTS:
             id: item.id,
             title: item.title,
             level: item.level,
-            index: parseInt(item.id.split('.').pop() || '0') || 0
+            index: parseInt(item.id.split('.').pop() || '0') || 0,
+            context: item.context || ""
           }))
         })
       });
@@ -537,8 +539,29 @@ CRITICAL REQUIREMENTS:
       if (jsonMatch && jsonMatch[1]) {
         const parsedOutline = JSON.parse(jsonMatch[1]);
         if (parsedOutline.outline) {
-          setFlatOutline(parsedOutline.outline);
-          setExpandedIds(new Set(parsedOutline.outline.filter((n: any) => n.level === 1).map((n: any) => n.id)));
+          setFlatOutline(prev => {
+            const activeIdx = prev.findIndex(item => item.id === activeChapterId);
+            if (activeIdx !== -1) {
+              const activeLevel = prev[activeIdx].level;
+              let activeEndIdx = prev.length;
+              for (let i = activeIdx + 1; i < prev.length; i++) {
+                if (prev[i].level <= activeLevel) {
+                  activeEndIdx = i;
+                  break;
+                }
+              }
+              const newOutline = [
+                ...prev.slice(0, activeIdx),
+                ...parsedOutline.outline,
+                ...prev.slice(activeEndIdx)
+              ];
+              setExpandedIds(new Set(newOutline.filter((n: any) => n.level === 1).map((n: any) => n.id)));
+              return newOutline;
+            } else {
+              setExpandedIds(new Set(parsedOutline.outline.filter((n: any) => n.level === 1).map((n: any) => n.id)));
+              return parsedOutline.outline;
+            }
+          });
           
           setMessages(prev => {
             const newMsgs = [...prev];

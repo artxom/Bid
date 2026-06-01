@@ -11,23 +11,28 @@ from docx.shared import Inches
 from docx.oxml.shared import OxmlElement
 from docx.oxml.ns import qn
 from typing import List, Dict, Any
-
-def compress_mermaid(mermaid_code: str) -> str:
-    """Encode mermaid string to base64 for Kroki"""
-    compressed = zlib.compress(mermaid_code.encode('utf-8'), 9)
-    return base64.urlsafe_b64encode(compressed).decode('utf-8')
+import time
 
 def render_mermaid_to_image(mermaid_code: str) -> io.BytesIO:
-    """Fetch PNG from kroki.io given mermaid code"""
-    payload = compress_mermaid(mermaid_code)
-    url = f"https://kroki.io/mermaid/png/{payload}"
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        return io.BytesIO(response.content)
-    except Exception as e:
-        print(f"Failed to render mermaid: {e}")
-        return None
+    """Fetch PNG from kroki.io using POST method for large payloads"""
+    url = "https://kroki.io/mermaid/png"
+    headers = {
+        "Content-Type": "text/plain",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    for attempt in range(3):
+        try:
+            response = requests.post(url, data=mermaid_code.strip().encode('utf-8'), headers=headers, timeout=15)
+            response.raise_for_status()
+            return io.BytesIO(response.content)
+        except Exception as e:
+            error_msg = str(e)
+            if hasattr(e, 'response') and e.response is not None:
+                error_msg = e.response.text
+            print(f"Failed to render mermaid (attempt {attempt + 1}): {error_msg}")
+            if attempt < 2:
+                time.sleep(1)
+    return None
 
 def clear_document(doc: Document):
     for paragraph in doc.paragraphs:
@@ -108,14 +113,23 @@ def render_ast_to_docx(doc, ast_nodes):
             table_children = node.get("children", [])
             all_rows = []
             for child in table_children:
-                if child.get("type") in ("table_head", "table_body"):
+                child_type = child.get("type")
+                if child_type == "table_head":
+                    cells = []
+                    for tc in child.get("children", []):
+                        if tc.get("type") == "table_cell":
+                            cells.append(tc.get("children", []))
+                    if cells:
+                        all_rows.append(cells)
+                elif child_type == "table_body":
                     for tr in child.get("children", []):
                         if tr.get("type") == "table_row":
                             cells = []
                             for tc in tr.get("children", []):
                                 if tc.get("type") == "table_cell":
                                     cells.append(tc.get("children", []))
-                            all_rows.append(cells)
+                            if cells:
+                                all_rows.append(cells)
             
             if all_rows and all_rows[0]:
                 try:
@@ -135,7 +149,7 @@ def render_ast_to_docx(doc, ast_nodes):
         elif ctype == "block_code":
             info = node.get("attrs", {}).get("info", "")
             val = node.get("raw", "")
-            if info == "mermaid":
+            if info and info.strip().lower() == "mermaid":
                 img_stream = render_mermaid_to_image(val)
                 if img_stream:
                     doc.add_picture(img_stream, width=Inches(5.0))
