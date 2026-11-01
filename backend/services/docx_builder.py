@@ -12,10 +12,13 @@ from docx.oxml.shared import OxmlElement
 from docx.oxml.ns import qn
 from typing import List, Dict, Any
 import time
+import asyncio
+import uuid
+import httpx
 
 def render_mermaid_to_image(mermaid_code: str) -> io.BytesIO:
-    """Fetch PNG from kroki.io using POST method for large payloads"""
-    url = "https://kroki.io/mermaid/png"
+    """Fetch PNG from kroki using POST method for large payloads"""
+    url = os.getenv("KROKI_URL", "http://kroki:8000/mermaid/png")
     headers = {
         "Content-Type": "text/plain",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -75,7 +78,7 @@ def render_inline(runs_container, children, bold=False, italic=False):
             elif "children" in child:
                 render_inline(runs_container, child.get("children", []), bold=bold, italic=italic)
 
-def render_ast_to_docx(doc, ast_nodes):
+def render_ast_to_docx(doc, ast_nodes, mermaid_cache=None):
     for node in ast_nodes:
         ctype = node.get("type")
         
@@ -147,7 +150,13 @@ def render_ast_to_docx(doc, ast_nodes):
             info = node.get("attrs", {}).get("info", "")
             val = node.get("raw", "")
             if info and info.strip().lower() == "mermaid":
-                img_stream = render_mermaid_to_image(val)
+                img_stream = None
+                if mermaid_cache and val in mermaid_cache:
+                    img_data = mermaid_cache[val]
+                    if img_data:
+                        img_stream = io.BytesIO(img_data)
+                else:
+                    img_stream = render_mermaid_to_image(val)
                 if img_stream:
                     doc.add_picture(img_stream, width=Inches(5.0))
                 else:
@@ -193,3 +202,125 @@ def rebuild_docx_from_outline(outline: List[Dict], template_path: str = None) ->
     buffer.seek(0)
     
     return buffer
+
+async def fetch_mermaid_async(client: httpx.AsyncClient, code: str, sem: asyncio.Semaphore = None):
+    async def _do_fetch():
+        url = os.getenv("KROKI_URL", "http://kroki:8000/mermaid/png")
+        headers = {
+            "Content-Type": "text/plain",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        for attempt in range(3):
+            try:
+                response = await client.post(url, content=code.strip().encode('utf-8'), headers=headers, timeout=25.0)
+                response.raise_for_status()
+                return code, response.content
+            except Exception as e:
+                if attempt < 2:
+                    await asyncio.sleep(2)
+        return code, None
+
+    if sem:
+        async with sem:
+            return await _do_fetch()
+    return await _do_fetch()
+
+def extract_mermaid_codes(ast_nodes):
+    codes = set()
+    for node in ast_nodes:
+        if node.get("type") == "block_code":
+            info = node.get("attrs", {}).get("info", "")
+            if info and info.strip().lower() == "mermaid":
+                codes.add(node.get("raw", ""))
+    return codes
+
+async def rebuild_docx_from_outline_stream(outline: List[Dict], template_path: str = None):
+    yield json.dumps({"type": "progress", "percent": 2, "message": "正在解析文档大纲与语法树..."}) + "\n\n"
+    
+    def init_doc():
+        if template_path and os.path.exists(template_path):
+            try:
+                doc = Document(template_path)
+                clear_document(doc)
+                return doc
+            except Exception as e:
+                print(f"Failed to load template {template_path}: {e}")
+        return Document()
+        
+    doc = await asyncio.to_thread(init_doc)
+    md_parser = mistune.create_markdown(renderer='ast', plugins=['table'])
+    
+    # 1. Parse AST sequentially (very fast, < 0.1s)
+    parsed_outlines = []
+    mermaid_codes = set()
+    for item in outline:
+        content = item.get("content", "")
+        if content:
+            ast_nodes = md_parser(content)
+            mermaid_codes.update(extract_mermaid_codes(ast_nodes))
+            parsed_outlines.append((item, ast_nodes))
+        else:
+            parsed_outlines.append((item, []))
+
+    yield json.dumps({"type": "progress", "percent": 5, "message": f"语法树解析完成，发现 {len(mermaid_codes)} 个架构图..."}) + "\n\n"
+    
+    # 2. Concurrently fetch all Mermaid diagrams
+    mermaid_cache = {}
+    if mermaid_codes:
+        sem = asyncio.Semaphore(3)
+        async with httpx.AsyncClient() as client:
+            tasks = [fetch_mermaid_async(client, code, sem) for code in mermaid_codes]
+            total_mermaids = len(tasks)
+            completed_mermaids = 0
+            for coro in asyncio.as_completed(tasks):
+                code, img_data = await coro
+                mermaid_cache[code] = img_data
+                completed_mermaids += 1
+                percent = 5 + int((completed_mermaids / total_mermaids) * 45) # 5% to 50%
+                yield json.dumps({"type": "progress", "percent": percent, "message": f"并发请求架构图 ({completed_mermaids}/{total_mermaids})..."}) + "\n\n"
+    else:
+        yield json.dumps({"type": "progress", "percent": 50, "message": "无需下载架构图，准备排版..."}) + "\n\n"
+
+    # 3. Assemble DOCX sequentially (CPU bound but fast with cached images)
+    total_nodes = len(parsed_outlines)
+    for idx, (item, ast_nodes) in enumerate(parsed_outlines):
+        title = item.get("title", "")
+        level = item.get("level", 1)
+        if level < 1: level = 1
+        elif level > 9: level = 9
+            
+        style_name = f"Heading {level}"
+        
+        percent = 50 + int((idx / total_nodes) * 49) # 50% to 99%
+        yield json.dumps({"type": "progress", "percent": percent, "message": f"正在排版: {title}"}) + "\n\n"
+        
+        def render_node(doc_obj, t, s_name, nodes, cache):
+            try:
+                doc_obj.add_paragraph(t, style=s_name)
+            except KeyError:
+                doc_obj.add_paragraph(t)
+            if nodes:
+                render_ast_to_docx(doc_obj, nodes, cache)
+                
+        await asyncio.to_thread(render_node, doc, title, style_name, ast_nodes, mermaid_cache)
+        await asyncio.sleep(0.01)
+        
+    yield json.dumps({"type": "progress", "percent": 99, "message": "正在保存并落盘..."}) + "\n\n"
+    
+    def save_doc():
+        buffer = io.BytesIO()
+        doc.save(buffer)
+        buffer.seek(0)
+        
+        uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+        os.makedirs(uploads_dir, exist_ok=True)
+        file_id = f"export_{uuid.uuid4().hex[:8]}.docx"
+        file_path = os.path.join(uploads_dir, file_id)
+        
+        with open(file_path, "wb") as f:
+            f.write(buffer.getvalue())
+            
+        return file_id
+        
+    file_id = await asyncio.to_thread(save_doc)
+    yield json.dumps({"type": "complete", "download_url": f"/download/{file_id}"}) + "\n\n"

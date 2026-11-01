@@ -28,3 +28,15 @@ services:
     depends_on:
       - backend
     restart: always
+
+  kroki:
+    image: yuzutech/kroki
+    ports:
+      - "8000:8000"
+    environment:
+      - KROKI_MERMAID_HOST=kroki-mermaid
+    restart: always
+
+  kroki-mermaid:
+    image: yuzutech/kroki-mermaid
+    restart: always

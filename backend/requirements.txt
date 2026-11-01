@@ -27,6 +27,6 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.7.0
 uvicorn==0.48.0
-google-genai==0.3.0
+openai
 sqlalchemy==2.0.28
 mistune>=3.0.0

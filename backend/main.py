@@ -1,6 +1,6 @@
 import re
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from docx import Document
 import uvicorn
@@ -12,11 +12,11 @@ from pydantic import BaseModel
 from typing import List, Optional
 from dotenv import load_dotenv
 import json
-from google import genai
+from openai import AsyncOpenAI
 import time
 
-from services.commander import rewrite_outline_with_gemini, stream_rewrite_outline_with_gemini
-from services.docx_builder import rebuild_docx_from_outline
+from services.commander import rewrite_outline_with_deepseek, stream_rewrite_outline_with_deepseek
+from services.docx_builder import rebuild_docx_from_outline, rebuild_docx_from_outline_stream
 from sqlalchemy.orm import Session
 from database import engine, get_db
 import models
@@ -109,32 +109,22 @@ async def root():
 @app.get("/models")
 async def get_models():
     try:
-        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
         if not api_key:
             raise ValueError("No API key found in environment variables.")
-        client = genai.Client(api_key=api_key)
-        models_list = client.models.list()
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        models_list = await client.models.list()
         result = []
-        for m in models_list:
-            # Check if it's a generative model
-            if hasattr(m, 'supported_generation_methods') and "generateContent" in getattr(m, 'supported_generation_methods', []):
-                result.append({"name": m.name, "display_name": m.display_name})
-        # If supported_generation_methods is not easily accessible in the new SDK version, fallback to just returning all or checking prefix
-        if not result:
-            for m in models_list:
-                if "gemini" in m.name.lower():
-                    result.append({"name": m.name, "display_name": m.display_name})
-                    
+        for m in models_list.data:
+            result.append({"name": m.id, "display_name": m.id})
+            
         return {"status": "success", "models": result}
     except Exception as e:
         print(f"Failed to fetch models dynamically: {e}")
-        # Fallback to standard models if API throws 501 or key missing
         fallback_models = [
-            {"name": "gemini-3.1-pro-preview", "display_name": "Gemini 3.1 Pro (Preview)"},
-            {"name": "gemini-3.5-flash", "display_name": "Gemini 3.5 Flash"},
-            {"name": "gemini-2.5-flash", "display_name": "Gemini 2.5 Flash"},
-            {"name": "gemini-1.5-pro", "display_name": "Gemini 1.5 Pro"},
-            {"name": "gemini-1.5-flash", "display_name": "Gemini 1.5 Flash"},
+            {"name": "deepseek-v4-pro", "display_name": "DeepSeek v4 Pro"},
+            {"name": "deepseek-v4-flash", "display_name": "DeepSeek v4 Flash"}
         ]
         return {"status": "success", "models": fallback_models}
 
@@ -148,14 +138,14 @@ class SectionItem(BaseModel):
 class GenerateRequest(BaseModel):
     sections: List[SectionItem]
     global_guidelines: Optional[str] = ""
-    flash_model: Optional[str] = "gemini-3.5-flash"
+    flash_model: Optional[str] = "deepseek-v4-pro"
 
 class RewriteRequest(BaseModel):
     instruction: str
     current_outline: List[dict]
     active_chapter_id: Optional[str] = None
     system_prompt: Optional[str] = None
-    pro_model: Optional[str] = "gemini-3.1-pro"
+    pro_model: Optional[str] = "deepseek-v4-pro"
 
 MAX_CONCURRENCY = 30
 global_dify_semaphore = None
@@ -174,12 +164,13 @@ async def call_dify_workflow(section: SectionItem, global_guidelines: str, flash
             "Content-Type": "application/json"
         }
         
-        # --- Pre-process context using Gemini Flash Model ---
+        # --- Pre-process context using DeepSeek Model ---
         detailed_context = section.context
         try:
-            gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-            if gemini_key:
-                client = genai.Client(api_key=gemini_key)
+            deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+            base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+            if deepseek_key:
+                client = AsyncOpenAI(api_key=deepseek_key, base_url=base_url)
                 prompt = f"""请根据大纲标题和全局规范，为该章节生成极度详尽的指导上下文和内容骨架，以便下游系统(如DeepSeek)能够生成长篇幅、高质量的最终内容。
 
 章节标题: {section.title}
@@ -196,21 +187,21 @@ async def call_dify_workflow(section: SectionItem, global_guidelines: str, flash
 请输出详尽、明确的指示和内容框架要点："""
                 
                 flash_start_time = time.time()
-                flash_response = client.models.generate_content(
-                    model=flash_model or "gemini-2.5-flash",
-                    contents=prompt,
+                flash_response = await client.chat.completions.create(
+                    model=flash_model or "deepseek-v4-pro",
+                    messages=[{"role": "user", "content": prompt}]
                 )
                 flash_latency = time.time() - flash_start_time
                 
-                if flash_response.text:
-                    detailed_context = flash_response.text
+                if flash_response.choices and flash_response.choices[0].message.content:
+                    detailed_context = flash_response.choices[0].message.content
                     
                 flash_usage = None
-                if hasattr(flash_response, 'usage_metadata') and flash_response.usage_metadata:
+                if flash_response.usage:
                     flash_usage = {
-                        "prompt_token_count": getattr(flash_response.usage_metadata, 'prompt_token_count', 0),
-                        "candidates_token_count": getattr(flash_response.usage_metadata, 'candidates_token_count', 0),
-                        "total_token_count": getattr(flash_response.usage_metadata, 'total_token_count', 0)
+                        "prompt_token_count": getattr(flash_response.usage, 'prompt_tokens', 0),
+                        "candidates_token_count": getattr(flash_response.usage, 'completion_tokens', 0),
+                        "total_token_count": getattr(flash_response.usage, 'total_tokens', 0)
                     }
                     
                 log_llm_request_async(
@@ -222,7 +213,7 @@ async def call_dify_workflow(section: SectionItem, global_guidelines: str, flash
                     usage_data=flash_usage
                 )
         except Exception as e:
-            print(f"Error generating pre-context with Gemini: {e}")
+            print(f"Error generating pre-context with DeepSeek: {e}")
             log_llm_request_async(
                 scenario="dify_pre_process_error",
                 model_used=flash_model,
@@ -330,10 +321,37 @@ async def export_outline(request: ExportRequest, db: Session = Depends(get_db)):
         traceback.print_exc()
         return {"status": "error", "error": str(e)}
 
+@app.post("/export-outline-stream")
+async def export_outline_stream(request: ExportRequest, db: Session = Depends(get_db)):
+    template_path = None
+    if request.project_id:
+        project = db.query(models.Project).filter(models.Project.id == request.project_id).first()
+        if project and project.template_path:
+            template_path = project.template_path
+            
+    async def event_generator():
+        try:
+            async for chunk in rebuild_docx_from_outline_stream(request.outline, template_path=template_path):
+                yield f"data: {chunk}"
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.get("/download/{filename}")
+async def download_file(filename: str):
+    file_path = os.path.join(os.path.dirname(__file__), "uploads", filename)
+    if not os.path.exists(file_path):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(file_path, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename="BidMaster_Export.docx")
+
 @app.post("/commander/rewrite-outline")
 async def rewrite_outline(request: RewriteRequest):
     try:
-        new_outline = await rewrite_outline_with_gemini(
+        new_outline = await rewrite_outline_with_deepseek(
             user_instruction=request.instruction,
             current_outline=request.current_outline,
             active_chapter_id=request.active_chapter_id,
@@ -365,7 +383,7 @@ async def rewrite_outline(request: RewriteRequest):
 async def rewrite_stream(request: RewriteRequest):
     async def event_generator():
         try:
-            async for chunk in stream_rewrite_outline_with_gemini(
+            async for chunk in stream_rewrite_outline_with_deepseek(
                 user_instruction=request.instruction,
                 current_outline=request.current_outline,
                 active_chapter_id=request.active_chapter_id,

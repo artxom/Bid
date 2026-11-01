@@ -38,3 +38,9 @@ frontend/.pnpm-debug.log*
 frontend/.vercel
 frontend/*.tsbuildinfo
 backend/uploads/
+
+# 忽略 SQLite 数据库文件
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

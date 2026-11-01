@@ -1,11 +1,11 @@
 import os
 import json
-from google import genai
-from google.genai import types
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 from typing import List
 import time
 from .logger import log_llm_request_async
+
 class OutlineItemModel(BaseModel):
     id: str
     title: str
@@ -58,18 +58,19 @@ def get_outline_context_and_target(outline: list, active_id: str):
 class RewriteResponse(BaseModel):
     outline: list[OutlineItemModel]
 
-async def rewrite_outline_with_gemini(user_instruction: str, current_outline: List[dict], active_chapter_id: str = None, system_prompt: str = None, model_name: str = None) -> List[dict]:
+async def rewrite_outline_with_deepseek(user_instruction: str, current_outline: List[dict], active_chapter_id: str = None, system_prompt: str = None, model_name: str = None) -> List[dict]:
     """
-    Call Gemini 3.1 Pro to rewrite the document outline based on user instructions.
+    Call DeepSeek to rewrite the document outline based on user instructions.
     """
-    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
     if not api_key:
-        raise ValueError("GOOGLE_API_KEY is not set in environment variables")
+        raise ValueError("DEEPSEEK_API_KEY is not set in environment variables")
         
-    actual_model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
+    actual_model_name = model_name or os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
     
-    # Initialize the new google-genai client
-    client = genai.Client(api_key=api_key)
+    # Initialize the new openai client
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     
     # Convert current outline to a readable string format for the model
     outline_str = json.dumps(current_outline, ensure_ascii=False, indent=2)
@@ -110,31 +111,29 @@ For example:
     start_time = time.time()
     
     # Generate content with structured output
-    response = client.models.generate_content(
+    response = await client.chat.completions.create(
         model=actual_model_name,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.2,
-        ),
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        temperature=0.2,
     )
     
     latency = time.time() - start_time
     
     usage_data = None
-    if hasattr(response, 'usage_metadata') and response.usage_metadata:
+    if response.usage:
         usage_data = {
-            "prompt_token_count": getattr(response.usage_metadata, 'prompt_token_count', 0),
-            "candidates_token_count": getattr(response.usage_metadata, 'candidates_token_count', 0),
-            "total_token_count": getattr(response.usage_metadata, 'total_token_count', 0)
+            "prompt_token_count": getattr(response.usage, 'prompt_tokens', 0),
+            "candidates_token_count": getattr(response.usage, 'completion_tokens', 0),
+            "total_token_count": getattr(response.usage, 'total_tokens', 0)
         }
 
     # Parse the response
     try:
-        if not response.text:
-            raise ValueError("Empty response from Gemini")
+        if not response.choices or not response.choices[0].message.content:
+            raise ValueError("Empty response from DeepSeek")
             
-        result = json.loads(response.text)
+        result = json.loads(response.choices[0].message.content)
         
         # Log request
         log_llm_request_async(
@@ -148,33 +147,33 @@ For example:
         
         return result.get("outline", [])
     except Exception as e:
-        print(f"Error parsing Gemini response: {e}")
-        print(f"Raw response: {response.text if hasattr(response, 'text') else str(response)}")
+        print(f"Error parsing DeepSeek response: {e}")
+        raw_resp = response.choices[0].message.content if response.choices else str(response)
+        print(f"Raw response: {raw_resp}")
         
         log_llm_request_async(
             scenario="outline_rewrite_error",
             model_used=actual_model_name,
             input_payload={"prompt": prompt},
-            output_payload={"error": str(e), "raw_response": response.text if hasattr(response, 'text') else str(response)},
+            output_payload={"error": str(e), "raw_response": raw_resp},
             latency=latency,
             usage_data=usage_data
         )
         raise e
 
-import time
-
-async def stream_rewrite_outline_with_gemini(user_instruction: str, current_outline: List[dict], active_chapter_id: str = None, system_prompt: str = None, model_name: str = None):
+async def stream_rewrite_outline_with_deepseek(user_instruction: str, current_outline: List[dict], active_chapter_id: str = None, system_prompt: str = None, model_name: str = None):
     """
-    Call Gemini 3.1 Pro to rewrite the document outline, returning an async stream of chunks.
+    Call DeepSeek to rewrite the document outline, returning an async stream of chunks.
     """
-    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
     if not api_key:
-        raise ValueError("GOOGLE_API_KEY is not set in environment variables")
+        raise ValueError("DEEPSEEK_API_KEY is not set in environment variables")
         
-    actual_model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
+    actual_model_name = model_name or os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
     
-    # Initialize the new google-genai client
-    client = genai.Client(api_key=api_key)
+    # Initialize the new openai client
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     
     # Convert current outline to a readable string format for the model
     outline_str = json.dumps(current_outline, ensure_ascii=False, indent=2)
@@ -226,30 +225,25 @@ DO NOT return the READ-ONLY CONTEXT nodes. Your output will exactly replace the 
     
     start_time = time.time()
     
-    # Use the async client `client.aio` for streaming in FastAPI
-    response_stream = client.aio.models.generate_content_stream(
+    response_stream = await client.chat.completions.create(
         model=actual_model_name,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.2,
-        ),
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        stream=True
     )
     
     full_response = ""
     usage_data = None
     
     async for chunk in response_stream:
-        if chunk.text:
-            yield chunk.text
-            full_response += chunk.text
+        # Check if the chunk contains content
+        if chunk.choices and chunk.choices[0].delta.content:
+            text = chunk.choices[0].delta.content
+            yield text
+            full_response += text
             
-        if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
-            # The final chunk usually contains the total usage metadata
-            usage_data = {
-                "prompt_token_count": getattr(chunk.usage_metadata, 'prompt_token_count', 0),
-                "candidates_token_count": getattr(chunk.usage_metadata, 'candidates_token_count', 0),
-                "total_token_count": getattr(chunk.usage_metadata, 'total_token_count', 0)
-            }
+        # In stream mode, OpenAI does not send usage stats by default unless explicitly enabled
+        # or we can just ignore it for now.
             
     elapsed = time.time() - start_time
     

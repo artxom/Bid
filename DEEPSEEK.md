@@ -27,4 +27,4 @@
 
 ## API 使用规范
 
-- **Gemini API**：本项目统一使用最新版 `google-genai` SDK（v0.3.0+，全面替代旧版 `google-generativeai`）。在进行任何涉及 Gemini 模型交互的代码编写或重构之前，**必须**首先查阅并严格遵循项目内的参考文档：`docs/gemini_api_reference.md`。严禁凭借记忆使用过时的语法（如在异步流式生成器上错误使用 `await`），所有的客户端初始化、异步流式传输和配置结构均以此文档为唯一准则。
+- **DeepSeek API**：本项目统一使用 `openai` SDK 连接 DeepSeek API。严禁凭借记忆使用过时的语法，所有的客户端初始化、异步流式传输和配置结构均以官方最新文档和 `https://api.deepseek.com/v1` 的说明为唯一准则。默认统一采用 `deepseek-v4-pro` 模型。

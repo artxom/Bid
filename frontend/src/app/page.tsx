@@ -37,7 +37,7 @@ interface OutlineItem {
 
 export interface GenTask {
   chapterId: string;
-  status: "queued" | "generating" | "success" | "error";
+  status: "queued" | "generating" | "success" | "error" | "removing";
   error?: string;
   abortController?: AbortController;
 }
@@ -176,12 +176,14 @@ CRITICAL REQUIREMENTS:
    - Level 1: 第一章, 第二章...
    - Level 2: 1.1, 1.2...
    - Level 3: 1.1.1, 1.1.2...`);
-  const [proModel, setProModel] = useState<string>("gemini-3.1-pro-preview");
-  const [flashModel, setFlashModel] = useState<string>("gemini-2.5-flash");
+  const [proModel, setProModel] = useState<string>("deepseek-v4-pro");
+  const [flashModel, setFlashModel] = useState<string>("deepseek-v4-pro");
   const [availableModels, setAvailableModels] = useState<{name: string, display_name: string}[]>([]);
   const [projectId, setProjectId] = useState<string | null>(null);
   const MAX_CONCURRENT_TASKS = 30;
   const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportMessage, setExportMessage] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -337,15 +339,29 @@ CRITICAL REQUIREMENTS:
           setFlatOutline(prev => {
             const updated = prev.map(item => item.id === chapter.id ? { ...item, content: generatedContent, status: "completed" as const } : item);
             if (projectId) {
-              fetch(`${apiUrl}/project/${projectId}/outline`, {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ outline: updated })
-              }).catch(e => console.error("Sync failed", e));
+              setTimeout(() => {
+                fetch(`${apiUrl}/project/${projectId}/outline`, {
+                  method: "PUT",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ outline: updated })
+                }).catch(e => console.error("Sync failed", e));
+              }, 0);
             }
             return updated;
           });
+          
           setTaskQueue(prev => ({ ...prev, [chapter.id]: { ...prev[chapter.id], status: "success" } }));
+          
+          setTimeout(() => {
+            setTaskQueue(prev => ({ ...prev, [chapter.id]: { ...prev[chapter.id], status: "removing" } }));
+            setTimeout(() => {
+              setTaskQueue(prev => {
+                const newQueue = { ...prev };
+                delete newQueue[chapter.id];
+                return newQueue;
+              });
+            }, 300);
+          }, 30000);
         } else {
           throw new Error(data.results?.[0]?.error || "生成失败");
         }
@@ -478,7 +494,7 @@ CRITICAL REQUIREMENTS:
       const startTime = Date.now();
 
       // Append a loading message
-      setMessages(prev => [...prev, { role: "assistant", content: "🚀 正在向 Gemini 发送重构请求..." }]);
+      setMessages(prev => [...prev, { role: "assistant", content: "🚀 正在向 DeepSeek 发送重构请求..." }]);
 
       while (true) {
         const { done, value } = await reader.read();
@@ -508,7 +524,7 @@ CRITICAL REQUIREMENTS:
                    const charCount = fullContent.length;
                    setMessages(prev => {
                      const newMsgs = [...prev];
-                     newMsgs[newMsgs.length - 1].content = `🧠 Gemini 正在分析重构中...\n\n⏱️ 已耗时: ${elapsed} 秒\n📊 已接收: 约 ${charCount} 个字符 (流式持续接收中...)`;
+                     newMsgs[newMsgs.length - 1].content = `🧠 DeepSeek 正在分析重构中...\n\n⏱️ 已耗时: ${elapsed} 秒\n📊 已接收: 约 ${charCount} 个字符 (流式持续接收中...)`;
                      return newMsgs;
                    });
                 }
@@ -589,7 +605,7 @@ CRITICAL REQUIREMENTS:
       console.error(error);
       setMessages(prev => {
         const newMsgs = [...prev];
-        if (newMsgs.length > 0 && newMsgs[newMsgs.length - 1].role === "assistant" && newMsgs[newMsgs.length - 1].content.includes("Gemini")) {
+        if (newMsgs.length > 0 && newMsgs[newMsgs.length - 1].role === "assistant" && newMsgs[newMsgs.length - 1].content.includes("DeepSeek")) {
           newMsgs[newMsgs.length - 1].content = `❌ 大纲重构失败: ${error.message}`;
         } else {
           newMsgs.push({ role: "assistant", content: `❌ 大纲重构失败: ${error.message}` });
@@ -608,34 +624,69 @@ CRITICAL REQUIREMENTS:
     }
     
     setIsExporting(true);
-    setMessages(prev => [...prev, { role: "assistant", content: "⏳ 正在基于当前目录结构生成空白 Word 文档..." }]);
+    setExportProgress(0);
+    setExportMessage("准备生成文档...");
     
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
-      const response = await fetch(`${apiUrl}/export-outline`, {
+      const response = await fetch(`${apiUrl}/export-outline-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ project_id: projectId, outline: flatOutline })
       });
       
       if (!response.ok) throw new Error("导出失败");
+      if (!response.body) throw new Error("无法读取流");
       
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = "投标文件_结构框架.docx";
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
       
-      setMessages(prev => [...prev, { role: "assistant", content: "✅ Word 空白框架文档生成成功！已为您开始下载，它的目录和层级已经严格对标最新大纲。" }]);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || ""; // Keep the last incomplete line in buffer
+        
+        for (const line of lines) {
+          if (line.trim() === "") continue;
+          if (line.startsWith("data: ")) {
+            const dataStr = line.slice(6);
+            if (!dataStr) continue;
+            try {
+              const data = JSON.parse(dataStr);
+              if (data.type === "progress") {
+                setExportProgress(data.percent);
+                setExportMessage(data.message);
+              } else if (data.type === "complete") {
+                setExportProgress(100);
+                setExportMessage("导出完成！正在启动下载...");
+                
+                const downloadUrl = `${apiUrl}${data.download_url}`;
+                const a = document.createElement('a');
+                a.href = downloadUrl;
+                a.download = "投标文件_结构框架.docx";
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                
+                setMessages(prev => [...prev, { role: "assistant", content: "✅ Word 空白框架文档生成成功！已为您开始下载，它的目录和层级已经严格对标最新大纲。" }]);
+              } else if (data.type === "error") {
+                throw new Error(data.message);
+              }
+            } catch(e) {
+              // ignore
+            }
+          }
+        }
+      }
     } catch (error: any) {
       console.error(error);
       setMessages(prev => [...prev, { role: "assistant", content: `❌ 导出失败: ${error.message}` }]);
     } finally {
-      setIsExporting(false);
+      setTimeout(() => setIsExporting(false), 2000);
     }
   };
 
@@ -866,18 +917,18 @@ CRITICAL REQUIREMENTS:
                 <X size={14} />
               </Button>
             </div>
-            <ScrollArea className="flex-1 p-0 bg-slate-50">
+            <div className="flex-1 p-0 bg-slate-50 overflow-y-auto">
               {Object.values(taskQueue).length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-full p-6 text-slate-400 text-sm gap-2">
                   <CheckCircle2 size={32} className="text-slate-300 opacity-50" />
                   <span>暂无运行中的生成任务</span>
                 </div>
               ) : (
-                <ul className="divide-y divide-slate-100 bg-white">
+                <ul className="bg-white">
                   {Object.values(taskQueue).map(task => {
                     const chapter = flatOutline.find(c => c.id === task.chapterId);
                     return (
-                      <li key={task.chapterId} className="px-4 py-3 flex items-center justify-between hover:bg-slate-50/80 transition-colors group">
+                      <li key={task.chapterId} className={`px-4 flex items-center justify-between group transition-all duration-300 overflow-hidden border-b border-slate-100 last:border-0 ${task.status === 'removing' ? 'opacity-0 max-h-0 py-0 border-transparent' : 'max-h-[100px] py-3 opacity-100 hover:bg-slate-50/80'}`}>
                         <div className="flex items-center gap-3 overflow-hidden flex-1 mr-2">
                           <div className="shrink-0">
                             {task.status === 'generating' && <Loader2 size={16} className="text-blue-500 animate-spin" />}
@@ -906,7 +957,7 @@ CRITICAL REQUIREMENTS:
                   })}
                 </ul>
               )}
-            </ScrollArea>
+            </div>
           </div>
         )}
         
@@ -982,7 +1033,7 @@ CRITICAL REQUIREMENTS:
           </div>
           <p className="text-[10px] text-center text-slate-400 mt-3 uppercase tracking-widest font-semibold flex items-center justify-center gap-1.5">
             <span className="h-px w-4 bg-slate-200"></span>
-            Powered by Gemini Pro
+            Powered by DeepSeek Pro
             <span className="h-px w-4 bg-slate-200"></span>
           </p>
         </div>
@@ -1002,7 +1053,7 @@ CRITICAL REQUIREMENTS:
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-semibold text-slate-700 mb-1">目录大纲重构系统提示词 (Outline Commander Prompt)</label>
-                  <p className="text-xs text-slate-500 mb-3">此提示词将被注入到 Gemini API 中，专门用于控制“一键重构目录”时的架构、专业度和拆解颗粒度。</p>
+                  <p className="text-xs text-slate-500 mb-3">此提示词将被注入到 DeepSeek API 中，专门用于控制“一键重构目录”时的架构、专业度和拆解颗粒度。</p>
                   <textarea 
                     className="w-full h-72 p-4 rounded-lg border border-slate-200 focus:border-primary focus:ring-1 focus:ring-primary outline-none resize-none font-mono text-sm bg-slate-50/50 text-slate-700 leading-relaxed shadow-inner"
                     value={systemPrompt}
@@ -1049,6 +1100,35 @@ CRITICAL REQUIREMENTS:
                 localStorage.setItem("flashModel", flashModel);
                 setIsSettingsOpen(false);
               }}>保存配置</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Export Progress Modal */}
+      {isExporting && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-[100] transition-all">
+          <div className="bg-white rounded-xl shadow-2xl w-[450px] max-w-[90vw] overflow-hidden transform scale-100 transition-transform">
+            <div className="px-6 py-5 border-b bg-slate-50/50 flex flex-col items-center justify-center">
+              <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center mb-3">
+                <FileText className="w-6 h-6 text-primary" />
+              </div>
+              <h2 className="text-lg font-bold text-slate-800">正在生成 Word 文档</h2>
+              <p className="text-sm text-slate-500 mt-1">服务器正在深度渲染图表与排版，请勿关闭页面</p>
+            </div>
+            <div className="p-8">
+              <div className="flex justify-between text-sm font-medium text-slate-700 mb-2">
+                <span className="truncate pr-4 max-w-[80%]">{exportMessage}</span>
+                <span className="text-primary font-bold shrink-0">{exportProgress}%</span>
+              </div>
+              <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden shadow-inner">
+                <div 
+                  className="h-full bg-primary rounded-full transition-all duration-300 ease-out relative overflow-hidden"
+                  style={{ width: `${exportProgress}%` }}
+                >
+                  <div className="absolute top-0 bottom-0 left-0 right-0 bg-white/20" style={{ animation: "shimmer 2s infinite" }}></div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
